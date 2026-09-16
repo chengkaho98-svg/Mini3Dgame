@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🍬 糖糖大亂鬥 SUGAR RUSH ROYALE</title>
+<meta property="og:title" content="🍬 糖糖大亂鬥 SUGAR RUSH ROYALE">
+<meta property="og:description" content="5 大糖果關卡 · 本地 4 位玩家＋AI 至 10 人混戰 · 致敬 Fall Guys">
+<meta property="og:image" content="cover.png">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍭</text></svg>">
+<style>
+  :root{
+    --candy-bg:#2a1a4a; --panel:rgba(30,18,60,.82); --pink:#ff5c9d;
+    --cyan:#31e6ff; --yellow:#ffd23e; --purple:#a25cff;
+    --good:#3ddc84; --warn:#ff5c5c;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#150d33;color:#fff;
+    font-family:"Segoe UI",微軟正黑體,system-ui,sans-serif;user-select:none}
+  #c{position:fixed;inset:0;display:block}
+  canvas{touch-action:none}
+  .hidden{display:none!important}
+  #hud{position:fixed;inset:0;pointer-events:none;z-index:10}
+  .clock{position:fixed;top:12px;left:50%;transform:translateX(-50%);
+    background:var(--panel);border:3px solid var(--pink);border-radius:999px;
+    padding:8px 26px;font-size:26px;font-weight:800;letter-spacing:2px;
+    box-shadow:0 4px 20px rgba(255,92,157,.35)}
+  .clock.low{color:#ff4141;animation:cpulse .45s infinite alternate;border-color:#ff4141}
+  @keyframes cpulse{from{transform:translateX(-50%) scale(1)}to{transform:translateX(-50%) scale(1.08)}}
+  .progt{position:fixed;top:76px;left:50%;transform:translateX(-50%);width:min(560px,84vw);
+    background:var(--panel);border-radius:999px;padding:7px 18px;text-align:center}
+  .progt .lbl{font-size:12px;opacity:.85;margin-bottom:3px;display:flex;justify-content:space-between}
+  .prog{position:relative;height:12px;background:rgba(255,255,255,.14);border-radius:999px;overflow:visible}
+  .prog>i{display:block;height:100%;width:0%;border-radius:999px;
+    background:linear-gradient(90deg,var(--cyan),var(--pink));transition:width .16s}
+  .rdot{position:absolute;top:-4px;width:10px;height:10px;border-radius:50%;
+    border:1.5px solid rgba(0,0,0,.4);transition:left .18s linear;pointer-events:none}
+  .rdot.hu{width:15px;height:15px;top:-7px;border:2.5px solid #fff;box-shadow:0 0 8px rgba(255,255,255,.8);z-index:2}
+  #cpBox{position:fixed;top:21%;left:24px;max-width:280px;background:var(--panel);
+    border:2px solid var(--cyan);border-radius:16px;padding:12px 18px;font-size:13px;line-height:1.8}
+  #cpBox b{color:var(--yellow);font-size:14px}
+  #stBox{position:fixed;top:21%;right:24px;min-width:150px;background:var(--panel);
+    border:2px solid var(--purple);border-radius:16px;padding:12px 18px;font-size:13px;line-height:1.8}
+  #stBox b{font-size:18px;color:var(--yellow)}
+  #rankBox{position:fixed;top:36%;right:24px;width:190px;background:var(--panel);
+    border:2px solid var(--cyan);border-radius:16px;padding:10px 14px;font-size:12.5px;line-height:1.5}
+  #rankBox .rt{font-weight:900;color:var(--yellow);font-size:13px;margin-bottom:4px;letter-spacing:1px}
+  .rrow{display:flex;align-items:center;gap:6px;padding:2px 0}
+  .rrow .rp{width:20px;font-weight:900;color:#cbb8f5;flex:none;text-align:right}
+  .rrow .rp.me{color:var(--pink)}
+  .rrow .dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 4px rgba(255,255,255,.35)}
+  .rrow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+  .rrow.me .nm{color:var(--pink)}
+  .rrow .rk{color:var(--yellow);font-weight:800;flex:none;font-size:11.5px}
+  .rrow .pb{flex:none;width:26px;height:5px;border-radius:99px;background:rgba(255,255,255,.16);overflow:hidden}
+  .rrow .pb>i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--cyan),var(--pink));width:0%}
+  .rrow.fin .nm{opacity:.6}
+  #hint{position:fixed;bottom:24%;left:50%;transform:translateX(-50%);font-size:15px;font-weight:700;
+    padding:8px 24px;border-radius:999px;background:rgba(20,12,44,.75);border:2px solid var(--yellow);white-space:nowrap;
+    max-width:92vw;overflow:hidden;text-overflow:ellipsis}
+  .kbd{background:#45306e;border:1px solid #6b4fa0;border-radius:4px;padding:1px 6px;
+    font-family:Consolas,monospace;font-weight:700;font-size:.86em}
+  #rot{position:fixed;bottom:104px;right:20px;font-size:12px;padding:4px 10px;border-radius:10px;
+    background:rgba(20,12,44,.55);color:#9a86c8}
+  .keyrow{position:fixed;bottom:18px;right:20px;display:flex;flex-direction:column;gap:5px;align-items:center}
+  .rowk{display:flex;gap:6px}
+  .wk{width:40px;height:40px;border-radius:9px;border:2px solid #6b4fa0;background:rgba(40,24,74,.85);
+    color:#d8c9ff;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;
+    box-shadow:0 3px 0 #35205c;position:relative}
+  .wk.on{background:var(--pink);border-color:#fff;color:#fff;transform:translateY(3px);box-shadow:none}
+  .wk.sp{width:96px}.wk.sh{font-size:11px}
+  .wk .tag{position:absolute;top:-17px;left:50%;transform:translateX(-50%);font-size:10px;
+    color:#8d76c2;white-space:nowrap;font-weight:700}
+  .btn{pointer-events:auto;cursor:pointer;background:linear-gradient(180deg,#ff7cb9,#ff4d8f);
+    border:3px solid #fff;color:#fff;font-weight:900;border-radius:999px;padding:11px 36px;font-size:18px;
+    letter-spacing:1px;box-shadow:0 5px 0 #b22a5f,0 8px 24px rgba(255,77,143,.4);transition:transform .1s}
+  .btn:active{transform:translateY(4px);box-shadow:0 1px 0 #b22a5f}
+  .btn.sec{background:linear-gradient(180deg,#7a5cff,#5330d8);box-shadow:0 5px 0 #311d99,0 8px 24px rgba(83,48,216,.4)}
+  .btn.sm{padding:7px 18px;font-size:14px}
+  #restart{position:fixed;top:12px;right:16px;padding:8px 22px;font-size:15px;pointer-events:auto}
+  .ov{position:fixed;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;
+    flex-direction:column;text-align:center;gap:14px;padding:24px}
+  #menu-ov{overflow-y:auto;background:
+    linear-gradient(180deg, rgba(20,10,48,.62) 0%, rgba(42,22,85,.58) 48%, rgba(20,10,48,.82) 100%),
+    url('cover.png') center 30%/cover no-repeat;
+    background-color:#140a30}
+  #menu-ov h1{font-size:min(58px,9vw);font-weight:900;letter-spacing:3px;
+    filter:drop-shadow(0 5px 0 rgba(0,0,0,.35))}
+  #menu-ov h1 span.c{display:inline-block;animation:bop 2.1s infinite ease-in-out;
+    background:linear-gradient(90deg,#ffd23e 10%,#ff5c9d 45%,#31e6ff 90%);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  #menu-ov h1 span.c:nth-child(1){animation-delay:0s}
+  #menu-ov h1 span.c:nth-child(2){animation-delay:.13s}#menu-ov h1 span.c:nth-child(3){animation-delay:.26s}
+  #menu-ov h1 span.c:nth-child(4){animation-delay:.39s}#menu-ov h1 span.c:nth-child(5){animation-delay:.52s}
+  #menu-ov h1 span.c:nth-child(6){animation-delay:.65s}
+  @keyframes bop{0%,100%{transform:translateY(0)}30%{transform:translateY(-13px) rotate(5deg)}}
+  #menu-ov p.sub{font-size:15px;color:#cbb8f5;margin-top:-4px}
+  .lvls{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;max-width:820px}
+  .lvl{position:relative;width:128px;padding:10px 8px;border-radius:15px;cursor:pointer;
+    background:rgba(255,255,255,.08);border:2px solid rgba(255,255,255,.3);
+    display:flex;flex-direction:column;align-items:center;gap:3px;pointer-events:auto;transition:transform .13s}
+  .lvl:hover{transform:translateY(-4px);background:rgba(255,255,255,.15)}
+  .lvl.done{border-color:var(--good);background:rgba(61,220,132,.13)}
+  .lvl.cur{border-color:var(--yellow);background:rgba(255,210,62,.12)}
+  .lvl.cur:after{content:'▶';position:absolute;bottom:3px;font-size:11px;color:var(--yellow)}
+  .lvl .n{font-size:22px;font-weight:900;color:var(--yellow)}
+  .lvl .t{font-size:13px;font-weight:700}
+  .lvl .stars{font-size:11px;letter-spacing:2px;color:var(--yellow)}
+  .lvl .diff{font-size:11px;color:#b9a3ec}
+  /* lobby */
+  .lobby{background:var(--panel);border:2px solid var(--cyan);border-radius:18px;padding:14px 20px;max-width:640px}
+  .lobby .lt{font-weight:900;color:var(--cyan);letter-spacing:2px;font-size:15px;margin-bottom:8px}
+  .slot{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.06);margin:4px 0}
+  .slot .sdot{width:26px;height:26px;border-radius:50%;border:2.5px solid #fff;cursor:pointer;flex:none;
+    box-shadow:inset 0 -5px 8px rgba(0,0,0,.3)}
+  .slot .snm{font-weight:900;font-size:16px;min-width:44px;text-align:left}
+  .slot .sin{color:#b9a3ec;font-size:13px;flex:1;text-align:left}
+  .slot .srm{cursor:pointer;color:#ff8a8a;font-weight:900;padding:2px 8px;border-radius:8px;background:rgba(255,80,80,.15)}
+  .slot .srm:hover{background:rgba(255,80,80,.35)}
+  .slotinfo{margin-top:8px;font-size:13px;color:#cbb8f5}
+  .slotinfo b{color:var(--yellow)}
+  .lobby .lrow{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap;justify-content:center}
+  .chk{display:flex;align-items:center;gap:6px;font-size:14px;color:#e8dfff;cursor:pointer}
+  .chk input{width:17px;height:17px;accent-color:var(--pink);cursor:pointer}
+  select{background:#2b1b52;color:#fff;border:2px solid #6b4fa0;border-radius:8px;padding:4px 8px;font-weight:700;cursor:pointer}
+  #menu-ov .stats{font-size:14px;color:#cbb8f5;line-height:1.9;max-width:760px}
+  #pause-ov,#res-ov{background:rgba(12,6,28,.85);backdrop-filter:blur(7px)}
+  .ov h2{font-weight:900}
+  #resTitle{font-size:50px}
+  #resTitle.win{color:var(--yellow);text-shadow:0 0 30px rgba(255,210,62,.5)}
+  #resTitle.lose{color:var(--warn)}
+  .stars{font-size:20px;font-weight:900;margin-bottom:6px}
+  .resList{display:flex;flex-direction:column;gap:2px;max-height:44vh;overflow-y:auto;min-width:300px}
+  .resList .rrow{font-size:15px;padding:3px 6px;border-radius:8px}
+  .resList .rrow.me{background:rgba(255,92,157,.15)}
+  .ov .row{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+  #count-ov{position:fixed;inset:0;z-index:28;display:flex;align-items:center;justify-content:center;
+    pointer-events:none;background:rgba(10,5,24,.18)}
+  #countNum{font-size:150px;font-weight:900;color:var(--yellow);
+    text-shadow:0 0 60px rgba(255,210,62,.8),0 8px 0 rgba(0,0,0,.4);
+    animation:cdpop .95s infinite}
+  #countNum.go{color:var(--good);font-size:130px;text-shadow:0 0 70px rgba(61,220,132,.9),0 8px 0 rgba(0,0,0,.4)}
+  @keyframes cdpop{0%{transform:scale(1.5);opacity:0}22%{transform:scale(1);opacity:1}100%{transform:scale(.92);opacity:.85}}
+  #toastBox{position:fixed;bottom:148px;left:50%;transform:translateX(-50%);z-index:26;
+    display:flex;flex-direction:column;align-items:center;gap:7px;pointer-events:none}
+  .toast{background:rgba(255,255,255,.94);color:#3a2a5e;font-weight:800;font-size:14px;
+    padding:9px 22px;border-radius:999px;box-shadow:0 5px 18px rgba(0,0,0,.3);white-space:nowrap}
+  .toast.bump{animation:tpop .5s}
+  @keyframes tpop{0%{transform:scale(.5)}55%{transform:scale(1.14)}100%{transform:scale(1)}}
+  .conf{position:fixed;width:11px;height:16px;top:-3vh;z-index:60;pointer-events:none;border-radius:2px}
+  @keyframes cf{to{transform:translateY(108vh) rotate(720deg)!important;opacity:.85}}
+  @media(max-width:760px){#cpBox,#stBox,#rankBox{display:none}.btn{padding:9px 26px;font-size:16px}
+    .lvl{width:104px}.clock{font-size:21px;padding:6px 18px}#countNum{font-size:110px}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud" class="hidden">
+  <div id="clock" class="clock">2:30</div>
+  <div class="progt">
+    <div class="lbl"><span id="lvname">LEVEL 1</span><span id="lvtime">--:--</span></div>
+    <div class="prog"><i id="progbar"></i><div id="racestrip"></div></div>
+  </div>
+  <div id="cpBox"></div>
+  <div id="stBox"></div>
+  <div id="rankBox"><div class="rt">🏁 即時排名</div><div id="rankList"></div></div>
+  <div id="hint"></div>
+  <div id="toastBox"></div>
+  <div id="rot">滑鼠拖曳=轉視角 · 滾輪=縮放</div>
+  <div class="keyrow">
+    <div class="rowk"><div class="wk" data-key="ShiftLeft">SHIFT<div class="tag">撲倒/起身</div></div>
+      <div class="wk sp" data-key="Space">JUMP</div></div>
+    <div class="rowk"><div class="wk" data-key="KeyW">W</div><div class="wk" data-key="KeyA">A</div>
+      <div class="wk" data-key="KeyS">S</div><div class="wk" data-key="KeyD">D</div></div>
+  </div>
+  <button id="restart" class="btn">↻ 重來</button>
+</div>
+
+<div id="count-ov" class="hidden"><div id="countNum">3</div></div>
+<div id="splitlines"></div>
+
+<div id="menu-ov" class="ov">
+  <h1><span class="c">🍬</span> <span class="c">糖</span> <span class="c">糖</span> <span class="c">大</span> <span class="c">亂</span> <span class="c">鬥</span></h1>
+  <p class="sub">SUGAR RUSH ROYALE · 5 大糖果關卡 · 本地最多 4 位玩家（分屏）＋機械人混戰 · 致敬 Fall Guys</p>
+  <div class="lvls" id="lvlSel"></div>
+  <div class="lobby">
+    <div class="lt">👥 本地多人 · 按鍵／手柄 A 即時加入（人類最多 4 位，機械人補位至 10）</div>
+    <div id="lobbySlots"></div>
+    <div class="lrow">
+      <button id="joinKb2" class="btn sec sm">＋ 鍵盤 P2（↑↓←→ · 右Ctrl 跳）</button>
+      <label class="chk">🤖 機械人
+        <select id="botCount">
+          <option value="-1" selected>自動（補至10人）</option>
+          <option value="0">0（純人類）</option>
+          <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+          <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+          <option value="7">7</option><option value="8">8</option><option value="9">9</option>
+        </select>
+      </label>
+      <label class="chk">✨ 畫面效果
+        <select id="fxSel"><option value="high" selected>高（泛光）</option><option value="low">低</option></select>
+      </label>
+    </div>
+    <div class="lrow" style="color:#9a86c8;font-size:12.5px">
+      🎮 手柄：按 A 加入 · 左搖桿移動 · A 跳 · X/B 撲倒 &nbsp;|&nbsp;
+      ⌨ P1：WASD＋Space＋左Shift &nbsp;|&nbsp; ⌨ P2：方向鍵＋右Ctrl／Enter＋右Shift
+    </div>
+  </div>
+  <div class="row"><button id="btnPlay" class="btn">▶ 開始比賽</button>
+    <button id="btnReset" class="btn sec">🗑 清除紀錄</button>
+    <button id="btnSound" class="btn sec">🔊 音效：開</button></div>
+  <div class="stats">A/D 轉向 · W 前進 · Space 跳 · Shift 撲倒 · 滑鼠旋轉視角 · Esc 暫停</div>
+</div>
+
+<div id="pause-ov" class="ov hidden"><h2 style="font-size:44px;color:var(--cyan)">⏸ 暫停</h2>
+  <div class="stats" id="pauseStats"></div>
+  <div class="row"><button id="btnResume" class="btn">▶ 繼續</button><button id="btnQuit" class="btn sec">🏠 主選單</button></div>
+</div>
+
+<div id="res-ov" class="ov hidden">
+  <h2 id="resTitle" class="win">🏆</h2>
+  <div class="stats" id="resStats"></div>
+  <div class="row">
+    <button id="btnNext" class="btn">➜ 下一關</button>
+    <button id="btnRetry" class="btn sec">↻ 重玩本關</button>
+    <button id="btnMenu" class="btn sec">🏠 主選單</button>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+  // Load THREE as ES module, publish on window for the classic scripts,
+  // then hand control to the game (main.js listens for this event).
+  import * as THREE from 'three';
+  window.THREE = THREE;
+  window.dispatchEvent(new Event('srr-three-ready'));
+</script>
+<script src="levels.js"></script>
+<script src="build.js"></script>
+<script src="bots.js"></script>
+<script type="module" src="main.js"></script>
+</body>
+</html>
