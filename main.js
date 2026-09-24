@@ -360,9 +360,9 @@ function refreshLobbyUI(){
   lobby.humans.forEach((h,i)=>{
     const d = document.createElement('div');
     d.className = 'slot';
-    const inTxt = h.input.kind==='kb'
-      ? (h.input.map===0 ? '⌨ WASD' : '⌨ ↑↓←→')
-      : '🎮 手柄 '+(h.input.idx+1);
+    const jk = KB_MAPS[h.input.map].jump[0].replace('Key','').replace('Control','Ctrl');
+    const dk = KB_MAPS[h.input.map].dive[0].replace('Key','').replace('ShiftLeft','左Shift').replace('ShiftRight','右Shift');
+    const inTxt = '⌨ '+KB_NAMES[h.input.map]+'（跳 '+jk+'·撲 '+dk+'）';
     d.innerHTML = '<span class="sdot" style="background:'+COLORS[h.color]+'"></span>'+
       '<span class="snm">'+h.name+'</span><span class="sin">'+inTxt+'</span>'+
       (i>0?'<span class="srm" title="移除">✕</span>':'<span class="sin">房主</span>');
@@ -377,36 +377,38 @@ function refreshLobbyUI(){
   const total = lobby.humans.length + bots;
   const info = document.createElement('div');
   info.className = 'slotinfo';
-  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-  let padN = 0;
-  for(const gp of pads){ if(gp && gp.connected) padN++; }
-  info.innerHTML = '👥 玩家：<b>'+lobby.humans.length+' / '+MAX_HUMANS+'</b> 人類 ＋ <b>'+bots+'</b> 機械人（共 <b>'+total+'</b> 人混戰）'+
-    (lobby.humans.length > 1 ? ' · 🖥 分屏 '+lobby.humans.length+' 視角' : '')+
-    '<br>🎮 已偵測手柄：<b>'+padN+'</b>'+(padN ? '（按 A 加入）' : '（插入手柄後撳任何掣即可偵測）');
+  info.innerHTML = '👥 玩家：<b>'+lobby.humans.length+' / '+MAX_HUMANS+'</b> 人類（鍵盤）＋ <b>'+bots+'</b> 機械人（共 <b>'+total+'</b> 人混戰）'+
+    (lobby.humans.length > 1 ? ' · 🖥 直切分屏 '+lobby.humans.length+' 欄' : '')+
+    '<br>⌨ 加入方法：撳 P2 方向鍵 / P3 IJKL / P4 TFGH 任一掣';
   UI.lobbySlots.appendChild(info);
 }
 
 // ================= input =================
 const KB_MAPS = [
   {left:['KeyA'], right:['KeyD'], up:['KeyW'], down:['KeyS'], jump:['Space'], dive:['ShiftLeft']},
-  {left:['ArrowLeft'], right:['ArrowRight'], up:['ArrowUp'], down:['ArrowDown'], jump:['ControlRight','Numpad0','Enter'], dive:['ShiftRight','Slash']}
+  {left:['ArrowLeft'], right:['ArrowRight'], up:['ArrowUp'], down:['ArrowDown'], jump:['ControlRight','Numpad0','Enter'], dive:['ShiftRight','Slash']},
+  {left:['KeyJ'], right:['KeyL'], up:['KeyI'], down:['KeyK'], jump:['KeyU'], dive:['KeyO']},
+  {left:['KeyF'], right:['KeyH'], up:['KeyT'], down:['KeyG'], jump:['KeyY'], dive:['KeyR']}
 ];
+const KB_NAMES = ['WASD', '↑↓←→', 'IJKL', 'TFGH'];
 const keys = {};
 addEventListener('keydown', e=>{
   if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
   keys[e.code] = true;
   if(e.code === 'Escape') togglePause();
-  // lobby join: any P2-map key while in menu
+  // lobby join: any key belonging to keyboard maps 1..3 while in menu
   if(S.phase === 'menu' && !e.repeat){
-    if(KB_MAPS[1].up.includes(e.code) || KB_MAPS[1].left.includes(e.code) || KB_MAPS[1].right.includes(e.code)){
-      if(!lobby.humans.some(h=>h.input.kind==='kb'&&h.input.map===1)) joinHuman({kind:'kb', map:1});
+    for(let m=1;m<KB_MAPS.length;m++){
+      const km = KB_MAPS[m];
+      if(km.up.includes(e.code) || km.left.includes(e.code) || km.right.includes(e.code) || km.jump.includes(e.code)){
+        if(!lobby.humans.some(h=>h.input.kind==='kb'&&h.input.map===m)) joinHuman({kind:'kb', map:m});
+        break;
+      }
     }
   }
 });
 addEventListener('keyup', e=>{ keys[e.code] = false; });
 addEventListener('blur', ()=>{ for(const k in keys) keys[k]=false; });
-addEventListener('gamepadconnected', refreshLobbyUI);
-addEventListener('gamepaddisconnected', refreshLobbyUI);
 
 // E2E / debug virtual drive: {racerName: {mx,mz,jump,dive}}
 const DBG_DRIVE = {};
@@ -432,36 +434,10 @@ window._DBG = { drive: DBG_DRIVE, S, racers, lobby,
   }
 };
 
-let padPrev = {};
-function pollPads(){
-  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-  for(let i=0;i<pads.length;i++){
-    const gp = pads[i];
-    if(!gp) continue;
-    const pressed = gp.buttons.map(b=>b.pressed);
-    const prev = padPrev[i] || [];
-    padPrev[i] = pressed;
-    // lobby join with A
-    if(S.phase==='menu' && pressed[0] && !prev[0]){
-      if(!lobby.humans.some(h=>h.input.kind==='pad'&&h.input.idx===i)) joinHuman({kind:'pad', idx:i});
-    }
-  }
-}
-function padInput(inp){
-  const gp = navigator.getGamepads ? navigator.getGamepads()[inp.idx] : null;
-  if(!gp) return {ix:0, iz:0, jump:false, dive:false};
-  let ix = gp.axes[0]||0, iz = gp.axes[1]||0;
-  const dz = 0.24;
-  if(Math.abs(ix)<dz) ix=0; if(Math.abs(iz)<dz) iz=0;
-  const bp = n=>!!(gp.buttons[n] && gp.buttons[n].pressed);
-  if(bp(14)) ix = -1; if(bp(15)) ix = 1;
-  if(bp(12)) iz = -1; if(bp(13)) iz = 1;
-  return {ix, iz, jump: bp(0), dive: bp(2)||bp(1)};
-}
 function humanIntent(r){
   const inp = r.input;
   let ix=0, iz=0, jump=false, dive=false;
-  if(inp.kind==='kb'){
+  {
     const m = KB_MAPS[inp.map];
     const any = arr=>arr.some(k=>keys[k]);
     if(any(m.left)) ix -= 1;
@@ -470,12 +446,11 @@ function humanIntent(r){
     if(any(m.down)) iz += 1;
     jump = any(m.jump);
     dive = any(m.dive);
-  } else {
-    const pi = padInput(inp);
-    ix = pi.ix; iz = pi.iz; jump = pi.jump; dive = pi.dive;
   }
-  // camera-relative transform for real devices
-  const cs = Math.cos(S.camYaw), sn = Math.sin(S.camYaw);
+  // controls are relative to THIS player's own viewport (P1 = mouse yaw,
+  // keyboard-only players keep the default forward view)
+  const yaw = (r.view && r.view.yaw !== undefined) ? r.view.yaw : S.camYaw;
+  const cs = Math.cos(yaw), sn = Math.sin(yaw);
   let wx = ix*cs + iz*sn, wz = -ix*sn + iz*cs;
   // virtual drive (E2E): world-space override, no camera rotation
   const vd = DBG_DRIVE[r.name];
@@ -1051,18 +1026,10 @@ function updateSplitLines(){
   box.innerHTML = '';
   const n = racers.filter(r=>r.kind==='human').length;
   if(n < 2) return;
-  const cols = n <= 2 ? 1 : (n <= 4 ? 2 : 3);
-  const rows = Math.ceil(n/cols);
-  for(let r=1;r<rows;r++){
+  // all-vertical split: one divider between each side-by-side column
+  for(let c=1;c<n;c++){
     const d = document.createElement('div');
-    d.style.cssText = 'position:fixed;left:0;right:0;top:'+(r*100/rows)+'%;height:3px;background:rgba(255,255,255,.4);z-index:9;pointer-events:none';
-    box.appendChild(d);
-  }
-  // vertical divider(s) — for 3P only the top half is split
-  for(let c=1;c<cols;c++){
-    const hPct = (n === 3) ? 50 : 100;
-    const d = document.createElement('div');
-    d.style.cssText = 'position:fixed;top:0;height:'+hPct+'%;left:'+(c*100/cols)+'%;width:3px;background:rgba(255,255,255,.4);z-index:9;pointer-events:none';
+    d.style.cssText = 'position:fixed;top:0;bottom:0;left:'+(c*100/n)+'%;width:3px;background:rgba(255,255,255,.4);z-index:9;pointer-events:none';
     box.appendChild(d);
   }
 }
@@ -1082,7 +1049,7 @@ function makeView(racer){
 function rebuildViews(){
   S.views = [];
   const humans = racers.filter(r=>r.kind==='human');
-  for(const h of humans) S.views.push(makeView(h));
+  for(const h of humans){ const v = makeView(h); h.view = v; S.views.push(v); }
   if(!S.views.length && racers.length) S.views.push(makeView(racers[0]));
   if(S.views.length){
     S.camera = S.views[0].cam;   // menu / solo path shares view0's camera
@@ -1110,31 +1077,15 @@ function renderRace(dt){
   // P1's mouse-controlled orbit writes into view0
   const v0 = S.views[0];
   v0.yaw = S.camYaw; v0.pitch = S.camPitch; v0.dist = S.camDist;
-  // gamepad players orbit their own view with the right stick
-  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-  for(let i=1;i<S.views.length;i++){
-    const v = S.views[i], inp = v.racer && v.racer.input;
-    if(!inp || inp.kind !== 'pad') continue;
-    const gp = pads[inp.idx];
-    if(!gp) continue;
-    const ax = gp.axes[2]||0, ay = gp.axes[3]||0;
-    if(Math.abs(ax) > 0.25) v.yaw -= ax*2.6*dt;
-    if(Math.abs(ay) > 0.25) v.pitch = Math.max(-0.05, Math.min(1.25, v.pitch + ay*1.4*dt));
-  }
   const humans = racers.filter(r=>r.kind==='human');
   if(humans.length > 1){
+    // ALL VERTICAL SPLITS: one full-height column per player, side by side
     const n = Math.min(humans.length, S.views.length);
-    const cols = n <= 2 ? 1 : (n <= 4 ? 2 : 3);
-    const rows = Math.ceil(n/cols);
     const R = S.renderer;
     R.setScissorTest(true);
     for(let i=0;i<n;i++){
       const v = S.views[i];
-      const gx = i % cols, gy = Math.floor(i/cols);
-      let vw = innerWidth/cols, px = gx*vw;
-      if(n === 3 && i === 2){ vw = innerWidth; px = 0; }   // 3P: bottom view spans full width
-      const vh = innerHeight/rows;
-      const py = innerHeight - (gy+1)*vh;
+      const vw = innerWidth/n, px = i*vw, vh = innerHeight, py = 0;
       R.setViewport(px, py, vw, vh);
       R.setScissor(px, py, vw, vh);
       updateFollowCam(v, dt);
@@ -1384,7 +1335,9 @@ function wireButtons(){
   $('btnSound').onclick = e=>{ AU.on=!AU.on; e.target.textContent = AU.on?'🔊 音效：開':'🔇 音效：關'; e.target.blur(); };
   if(UI.botCount) UI.botCount.onchange = ()=>{ lobby.botCount = parseInt(UI.botCount.value, 10); refreshLobbyUI(); };
   if(UI.joinKb2) UI.joinKb2.onclick = e=>{ e.target.blur();
-    if(!lobby.humans.some(h=>h.input.kind==='kb'&&h.input.map===1)) joinHuman({kind:'kb', map:1});
+    for(let m=1;m<KB_MAPS.length;m++){
+      if(!lobby.humans.some(h=>h.input.kind==='kb'&&h.input.map===m)){ joinHuman({kind:'kb', map:m}); return; }
+    }
   };
   if(UI.fxSel){
     UI.fxSel.onchange = ()=>{ FX_QUALITY = UI.fxSel.value; S.composer = null; };
@@ -1496,7 +1449,6 @@ function frame(now){
   let dt = Math.min(0.05, (now-lastT)/1000);
   lastT = now;
   if(!S.scene || !S.renderer) return;
-  pollPads();
 
   if(S.phase === 'menu'){
     // idle backdrop: slow orbit around the start area, obstacles keep moving
