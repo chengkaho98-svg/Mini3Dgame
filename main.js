@@ -138,7 +138,7 @@ function makeLights(scene, L){
   const sun = new T.DirectionalLight(0xfff2dd, 1.15);
   sun.position.set(14, 26, -12);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.mapSize.set(1024, 1024);
   sun.shadow.camera.left = -36; sun.shadow.camera.right = 36;
   sun.shadow.camera.top = 36; sun.shadow.camera.bottom = -36;
   sun.shadow.camera.far = 110;
@@ -196,7 +196,7 @@ function makeWater(L){
 
 // ================= particles =================
 function makeParticles(scene){
-  const N = 320;
+  const N = 200;
   const geo = new T.BufferGeometry();
   const pos = new Float32Array(N*3), col = new Float32Array(N*3);
   geo.setAttribute('position', new T.BufferAttribute(pos, 3));
@@ -1445,10 +1445,29 @@ function stepSim(){
     }
   }
 }
+// adaptive resolution: keep 60fps by scaling render resolution
+S.fpsEMA = 60; S.basePR = Math.min(devicePixelRatio, 2); S.curPR = S.basePR;
+S.prCheckT = 0;
+function adaptiveRes(dt){
+  S.fpsEMA += (1/Math.max(0.001, dt) - S.fpsEMA) * 0.05;
+  S.prCheckT += dt;
+  if(S.prCheckT < 2) return;
+  S.prCheckT = 0;
+  if(S.fpsEMA < 45 && S.curPR > 1){
+    S.curPR = Math.max(1, S.curPR - 0.25);
+    S.renderer.setPixelRatio(S.curPR);
+    if(S.composer) S.composer.setSize(innerWidth, innerHeight);
+  } else if(S.fpsEMA > 57 && S.curPR < S.basePR){
+    S.curPR = Math.min(S.basePR, S.curPR + 0.25);
+    S.renderer.setPixelRatio(S.curPR);
+    if(S.composer) S.composer.setSize(innerWidth, innerHeight);
+  }
+}
 function frame(now){
   let dt = Math.min(0.05, (now-lastT)/1000);
   lastT = now;
   if(!S.scene || !S.renderer) return;
+  adaptiveRes(dt);
 
   if(S.phase === 'menu'){
     // idle backdrop: slow orbit around the start area, obstacles keep moving
