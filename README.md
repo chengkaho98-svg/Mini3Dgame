@@ -87,6 +87,10 @@ node server.js
 
 ## 📖 AI 開發 Playbook
 
-`糖糖大亂鬥_AI開發Playbook.pptx` — 14 頁客戶演示簡報：遊戲簡介、開發流程、
-本地 AI 引擎（ZGX NANO × GLM-5.3-Flash-FP8）、技術棧、8 個開發步驟（Prompt＋實際截圖）、
-成果指標。由 `build_ppt.py` 生成，`render_ppt.ps1` 渲染預覽（ppt-render/）。
+雙語 14 頁客戶演示簡報：
+- `糖糖大亂鬥_AI開發Playbook.pptx` — 中文書面語版
+- `AI_Game_Development_Playbook_EN.pptx` — English edition
+
+內容：遊戲簡介、開發流程、本地 AI 引擎（ZGX NANO × GLM-5.3-Flash-FP8）、技術棧、
+8 個開發步驟（Prompt＋實際截圖）、成果指標。由 `build_ppt.py` 生成兩版，
+`render_ppt.ps1` 渲染預覽（ppt-render-zh/ ＆ ppt-render-en/）。
