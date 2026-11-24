@@ -8,6 +8,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 
 const T = THREE;
 const LVL = window.LEVELS || [];
@@ -19,9 +20,11 @@ const API = new Proxy({}, {
 
 // ================= constants =================
 const CY_R = 0.42, CY_H = 1.04;
-const GRAV = 34, JUMP_V = 11.2, MAX_SPD = 6.2, MOVE_ACC = 46, DIVE_V = 11;
+const GRAV = 34, JUMP_V = 11.2, MAX_SPD = 6.2, MOVE_ACC = 46, DIVE_V = 12.5;
 const FIXED = 1/120;
 const MAX_RACERS = 10;
+const BOOST_AIR_HEIGHT = 1.9;   // how high above a boost pad still triggers it
+const BOOST_AIR_LIFT = 7.5;     // min upward speed kept when boosted mid-air
 const MAX_HUMANS = 4;   // local human players: keyboard x2 + gamepads
 // shared with bots.js (ballistic maths must match the player exactly)
 window.SRR_CONST = { GRAV, JUMP_V, MAX_SPD, MOVE_ACC, DIVE_V,
@@ -103,6 +106,7 @@ function toast(msg){
 
 // ================= renderer / scene =================
 let FX_QUALITY = 'high';
+let SSAO_ON = true;        // contact-shadow pass in the bloom composer (solo view)
 function initRenderer(){
   const canvas = $('c');
   S.renderer = new T.WebGLRenderer({canvas, antialias:true});
@@ -126,11 +130,23 @@ function onResize(){
   S.camera.updateProjectionMatrix();
   S.renderer.setSize(innerWidth, innerHeight);
   if(S.composer) S.composer.setSize(innerWidth, innerHeight);
+  if(S.ssaoPass) S.ssaoPass.setSize(innerWidth, innerHeight);
 }
 function buildComposer(){
   try{
     const c = new EffectComposer(S.renderer);
     c.addPass(new RenderPass(S.scene, S.camera));
+    // ambient occlusion: soft contact shadows where props meet the floor, so
+    // the scene reads as solid objects rather than stickers on a plane
+    if(SSAO_ON){
+      const ssao = new SSAOPass(S.scene, S.camera, innerWidth, innerHeight);
+      ssao.kernelRadius = 0.55;      // world-space reach of the occlusion
+      ssao.minDistance = 0.001;
+      ssao.maxDistance = 0.14;
+      ssao.output = SSAOPass.OUTPUT.Default;
+      c.addPass(ssao);
+      S.ssaoPass = ssao;
+    }
     const bloom = new UnrealBloomPass(new T.Vector2(innerWidth, innerHeight), 0.32, 0.62, 0.82);
     c.addPass(bloom);
     c.addPass(new OutputPass());
@@ -178,22 +194,53 @@ function makeWater(L){
   const z1 = L.road[1][1];
   const colA = L.theme==='honey' ? new T.Color(0xe8961f) : L.theme==='canyon' ? new T.Color(0x2ec96e) : new T.Color(0x2f6bff);
   const colB = colA.clone().lerp(new T.Color(0xffffff), 0.55);
+  const skyTop = new T.Color(L.sky[0], L.sky[1], L.sky[2]);
+  const skyBot = new T.Color(L.fog[0], L.fog[1], L.fog[2]);
+  // Reflective water. The reflection is a procedural sky gradient sampled along
+  // the reflected view ray (tinted per level) instead of a real mirror pass:
+  // it costs no extra scene render and works in every split-screen viewport,
+  // while a Fresnel term makes far water read as a mirror and near water as
+  // deep coloured liquid — the cue players use to spot a drop.
   const mat_ = new T.ShaderMaterial({
     transparent:true,
-    uniforms:{ cA:{value:colA}, cB:{value:colB}, tt:{value:0} },
-    vertexShader:`varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
-    fragmentShader:`varying vec2 vUv; uniform vec3 cA; uniform vec3 cB; uniform float tt;
+    uniforms:{ cA:{value:colA}, cB:{value:colB}, skyTop:{value:skyTop}, skyBot:{value:skyBot}, tt:{value:0} },
+    vertexShader:`
+      varying vec3 vWorld;
       void main(){
-        // bold rolling waves: two crossing sine trains + sparkle caps
-        float w1 = sin(vUv.x*140.0 + tt*1.6);
-        float w2 = sin(vUv.y*180.0 - tt*2.2 + w1*0.7);
-        float w = w1*0.5 + w2*0.5;
-        float band = smoothstep(-0.25, 0.3, w);
-        vec3 c = mix(cA, cB, band);
-        // white foam caps on the crests
-        float foam = smoothstep(0.78, 0.95, w);
-        c = mix(c, vec3(1.0), foam*0.85);
-        gl_FragColor = vec4(c, 0.96);
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorld = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }`,
+    fragmentShader:`
+      varying vec3 vWorld;
+      uniform vec3 cA; uniform vec3 cB; uniform vec3 skyTop; uniform vec3 skyBot; uniform float tt;
+      // calm large-scale swell: a few soft sine trains that tilt the normal
+      vec3 waveNormal(vec2 p, float t){
+        vec2 q = p * 0.22;
+        float a = sin(q.x*1.7 + t*0.9) + sin(q.y*2.3 - t*1.1 + sin(q.x*0.8)*1.3);
+        float b = sin((q.x+q.y)*1.3 - t*0.7) + sin(q.x*3.1 + q.y*2.2 + t*1.4);
+        return normalize(vec3(-a*0.045, 1.0, -b*0.045));
+      }
+      void main(){
+        vec3 N = waveNormal(vWorld.xz, tt);
+        vec3 V = normalize(cameraPosition - vWorld);
+        // Schlick Fresnel: dark face-on, mirror-like at grazing angles
+        float cosT = clamp(dot(N, V), 0.0, 1.0);
+        float fres = 0.04 + 0.96 * pow(1.0 - cosT, 5.0);
+        // deep water colour with a slow drifting tone variation
+        float tone = 0.5 + 0.5*sin(vWorld.x*0.11 + vWorld.z*0.07 + tt*0.35);
+        vec3 deep = mix(cA, cB, tone*0.35);
+        // reflected sky along the mirrored view direction
+        vec3 R = reflect(-V, N);
+        float h = clamp(R.y, 0.0, 1.0);
+        vec3 refl = mix(skyBot, skyTop, pow(h, 0.6));
+        vec3 col = mix(deep, refl, fres);
+        // soft drifting sparkle band, kept subtle
+        float sp = sin(vWorld.x*0.45 + tt*0.8) * sin(vWorld.z*0.38 - tt*0.6);
+        col += vec3(1.0) * smoothstep(0.86, 1.0, sp) * 0.08;
+        gl_FragColor = vec4(col, 0.97);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }`
   });
   const m = new T.Mesh(new T.PlaneGeometry(300, z1+120), mat_);
@@ -339,9 +386,27 @@ function buildBean(colorHex, name, isHuman){
   armLP.position.set(-0.4, CY_H*0.62, 0); armRP.position.set(0.4, CY_H*0.62, 0);
   armLP.rotation.z = 0.5; armRP.rotation.z = -0.5;
   inner.add(armLP); inner.add(armRP);
+  // OUTLINE SHELL (inverted hull): a slightly inflated, back-face-only white
+  // shell around the body. Post-processing outlines don't work with the
+  // scissored split-screen viewports, but a hull renders in every viewport
+  // for free — so each human player can spot their own bean at a glance.
+  let outline = null;
+  if(isHuman){
+    outline = new T.Mesh(GEO.cap, OUTLINE_MAT);
+    outline.scale.setScalar(1.13);
+    outline.position.y = CY_H/2;
+    outline.renderOrder = -1;
+    inner.add(outline);
+  }
   g.add(nameTagSprite(name, colorHex, isHuman));
-  return {g, inner, armLP, armRP, legL, legR, body};
+  return {g, inner, armLP, armRP, legL, legR, body, outline};
 }
+
+// one shared outline material: unlit white, no depth writes, slightly pulsing
+const OUTLINE_MAT = new T.MeshBasicMaterial({
+  color:0xffffff, side:T.BackSide, depthWrite:false, toneMapped:false
+});
+OUTLINE_MAT.__keep = true;   // shared across beans — never disposed with one
 
 // ================= lobby =================
 const COLORS = ['#ff5c9d','#31e6ff','#ffd23e','#58e06c','#a25cff','#ff8a3d','#ff4d4d','#ffffff','#ffa3d1','#7fd0f7'];
@@ -487,7 +552,7 @@ function mkBody(){
   return {
     pos:new T.Vector3(), vel:new T.Vector3(),
     upright:true, fallT:0, tripSev:0, dive:false, diveT:0,
-    coyote:0, jumpLatch:false, jumpBuf:0, squash:0, grounded:false, groundBoard:null,
+    coyote:0, jumpLatch:false, jumpBuf:0, diveHeld:false, diveAir:false, squash:0, grounded:false, groundBoard:null,
     glueMul:1, whackCd:-9, bumpCd:0, boostCd:0, speedMul:1, inFan:false,
     animT:0, runPhase:0, faceYaw:0
   };
@@ -563,27 +628,45 @@ function stepBody(B, intent, dt, r){
   // --- belt & boost pads ---
   if(gb && gb.belt){ B.vel.z += gb.belt*dt*10; }
   B.boostCd -= dt;
-  if(gb && gb.boost && B.boostCd <= 0 && wasGrounded){
-    B.vel.z += gb.boost;
+  // Boost pad triggers when you run onto it OR fly over it just above the
+  // surface. (Standing-only made an early jump fatal: you sailed clean over
+  // the pad with no boost and dropped into the gap it was meant to clear.)
+  let boostPad = (gb && gb.boost && wasGrounded) ? gb : null;
+  if(!boostPad && B.boostCd <= 0){
+    for(const b of API.RT.boards){
+      if(!b.boost || b.disabled) continue;
+      if(B.pos.x >= b.x-b.hx && B.pos.x <= b.x+b.hx && B.pos.z >= b.z-b.hz && B.pos.z <= b.z+b.hz &&
+         B.pos.y > b.y - 0.05 && B.pos.y < b.y + BOOST_AIR_HEIGHT){ boostPad = b; break; }
+    }
+  }
+  if(boostPad && B.boostCd <= 0){
+    const airborne = !wasGrounded;
+    B.vel.z += boostPad.boost;
     B.vel.x *= 0.35;
+    // An airborne boost (early jump) fires mid-arc; without a lift the extra
+    // speed would still drop you into the gap. Top the arc up to a minimum
+    // rise so an early jump lands as reliably as a jump from the pad itself.
+    if(airborne && B.vel.y < BOOST_AIR_LIFT) B.vel.y = BOOST_AIR_LIFT;
     B.boostCd = 1.1;
     if(r && r.kind==='human'){ AU.whoosh(); }
     if(S.particles) S.particles.burst(B.pos.x, B.pos.y+0.3, B.pos.z, 0xffd23e, 10, 0.7, 3, 2, 0.5);
   }
 
-  // --- dive start ---
-  if(intent.dive && B.upright && wasGrounded && !B.dive){
-    B.dive = true; B.diveT = 0;
+  // --- dive ---
+  // Works from the ground AND mid-air (the classic finish-line lunge).
+  // Ground dive: a small hop + burst forward. Air dive: converts to a forward
+  // lunge without the hop (keeps you from gaining free height).
+  if(intent.dive && !B.diveHeld && B.upright && !B.dive){
+    B.dive = true; B.diveT = 0; B.diveAir = !wasGrounded;
     const dl = Math.max(0.3, Math.hypot(ix,iz)||1);
-    B.vel.x += (ix/dl)*DIVE_V*0.5;
-    B.vel.z += (iz/dl)*DIVE_V*0.5;
-    B.vel.y = 3.2;
+    B.vel.x += (ix/dl)*DIVE_V*0.45;
+    B.vel.z += (iz/dl)*DIVE_V*0.45;
+    if(wasGrounded) B.vel.y = Math.max(B.vel.y, 3.0);
+    else if(B.vel.y < -1) B.vel.y = -1;     // soften a fall into a lunge
     if(r && r.kind==='human') AU.beep(340,0.18,'sawtooth',0.09,-160);
   }
-  if(B.dive){
-    B.diveT += dt;
-    if(B.diveT > 0.55){ B.dive = false; tripBody(B, 0.5); }
-  }
+  B.diveHeld = !!intent.dive;
+  if(B.dive) B.diveT += dt;   // ended after the ground resolve (see below)
 
   // --- jump: buffered + coyote-time (kills input latency and "couldn't jump" feels) ---
   // jumpBuf: a press made up to 0.15s before landing is remembered and fires
@@ -655,6 +738,19 @@ function stepBody(B, intent, dt, r){
   }
   if(B.grounded) B.coyote = 0.12;
   else B.coyote = Math.max(0, B.coyote - dt);
+
+  // --- dive end (ground state is current here) ---
+  // Touching down ends the lunge at once and hands control straight back
+  // (no get-up delay): a dive should feel like a slide, not a face-plant.
+  // Only a dive that times out still in the air tumbles into a short trip.
+  if(B.dive && (B.grounded || B.diveT > 0.6)){
+    const landed = B.grounded;
+    B.dive = false;
+    // keep the forward momentum on touchdown: the dive is a lunge, and the
+    // slide afterwards IS the distance you bought (drag bleeds it off naturally)
+    if(landed){ B.squash = 0.3; }
+    else tripBody(B, 0.3);
+  }
 
   // --- solids ---
   resolveSolids(B, r);
@@ -987,7 +1083,10 @@ function updateCountdown(dt){
   const n = Math.ceil(S.countdownT - 0.4);
   if(n < cdLast){
     cdLast = n;
-    if(n > 0){ UI.countNum.textContent = n; UI.countNum.classList.remove('go'); AU.cd(n); }
+    // retrigger the CSS pop for each tick: remove the class, force a reflow, re-add
+    UI.countNum.classList.remove('go', 'tick');
+    void UI.countNum.offsetWidth;
+    if(n > 0){ UI.countNum.textContent = n; UI.countNum.classList.add('tick'); AU.cd(n); }
     else if(n === 0){ UI.countNum.textContent = 'GO!'; UI.countNum.classList.add('go'); AU.cd(0); }
   }
   if(S.countdownT <= 0){
@@ -1077,7 +1176,7 @@ function buildResults(reason){
   let rows = '';
   order.forEach((r,i)=>{
     const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(r.finished?(''+(i+1)):'—');
-    rows += '<div class="rrow'+(r.kind==='human'?' me':'')+(r.finished?' fin':'')+'">'+
+    rows += '<div class="rrow'+(r.kind==='human'?' me':'')+(r.finished?' fin':'')+'" style="animation-delay:'+(0.12 + i*0.055).toFixed(3)+'s">'+
       '<span class="rp">'+medal+'</span>'+
       '<span class="dot" style="background:'+r.colorHex+'"></span>'+
       '<span class="nm">'+r.name+(r.kind==='human'?' 👤':' 🤖')+'</span>'+
@@ -1245,6 +1344,10 @@ function updateBeanVisual(r, dt){
   const sq = B.squash;
   const sy = 1 + sq, sxz = 1 - sq*0.6;
   inner.scale.set(sxz, sy, sxz);
+  // outline shell breathes so the player's bean stays easy to spot
+  if(P.outline){
+    P.outline.scale.setScalar(1.13 + 0.03*Math.sin(S.worldT*4.5));
+  }
   // fan hover spin flair
   if(B.inFan){
     inner.rotation.z = Math.sin(S.worldT*6)*0.12;

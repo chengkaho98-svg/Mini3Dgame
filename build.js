@@ -494,42 +494,50 @@ function buildGap(g, L, o){
       g.add(cap);
     }
   }
-  // JUMP arrow decal on the approach lane (visible from far away)
+  // FLOWING CHEVRON LANE: a strip of arrows on the approach that streams toward
+  // the edge. One shared canvas texture scrolled by UV offset, so it reads as
+  // motion ("jump here") from far away at zero extra draw calls per arrow.
   if(typeof document !== 'undefined'){
-    const dcnv = document.createElement('canvas');
-  dcnv.width = 256; dcnv.height = 256;
-  const dctx = dcnv.getContext('2d');
-  dctx.fillStyle = 'rgba(255,210,62,0.94)';
-  dctx.beginPath();
-  if(dctx.roundRect) dctx.roundRect(8, 8, 240, 240, 40); else dctx.rect(8,8,240,240);
-  dctx.fill();
-  dctx.fillStyle = '#7a1010';
-  dctx.font = '900 92px "Segoe UI", sans-serif';
-  dctx.textAlign = 'center'; dctx.textBaseline = 'middle';
-  dctx.fillText('JUMP', 128, 178);
-  dctx.beginPath();
-  dctx.moveTo(128, 28); dctx.lineTo(208, 120); dctx.lineTo(158, 120);
-  dctx.lineTo(158, 148); dctx.lineTo(98, 148); dctx.lineTo(98, 120);
-  dctx.lineTo(48, 120); dctx.closePath();
-  dctx.fill();
-  const dtex = new THREE.CanvasTexture(dcnv);
-  const decal = new THREE.Mesh(_GEO.plane, new THREE.MeshBasicMaterial({map:dtex, transparent:true, depthWrite:false}));
-  decal.rotation.set(-Math.PI/2, 0, Math.PI);   // arrow points +z toward the gap
-  decal.scale.set(Math.min(3.2, w*0.8), 3.2, 1);
-  // pick an approach slot not covered by a boost pad / bounce pad
-  const slotBusy = (zz)=>{
+    // the lane must end before the first launch pad on the approach (a boost
+    // or bounce pad), otherwise arrows run underneath it and get hidden
+    let laneEnd = z0 - 0.4;
     for(const b of RT.boards){
-      if(!zz || zz - 1.6 > b.z + (b.hz||1) || zz + 1.6 < b.z - (b.hz||1)) continue;
-      if(Math.abs(b.x - cx) < (b.hx||1) + 1.6 && b.y > 0.05) return true;
+      if(!((b.boost || b.bounce) && !b.disabled)) continue;
+      if(Math.abs(b.x - cx) >= (b.hx||1) - 0.3) continue;
+      if(b.z + (b.hz||1) < z0 && b.z > z0 - 12) laneEnd = Math.min(laneEnd, b.z - (b.hz||1) - 0.4);
     }
-    return false;
-  };
-  let dz = null;
-  for(const cand of [z0-2.2, z0-3.6, z0-1.4, z0-5.0]){
-    if(cand > 1 && !slotBusy(cand)){ dz = cand; break; }
-  }
-  decal.position.set(cx, 0.025, dz === null ? Math.max(z0-2.2, 1) : dz);
-  g.add(decal);
+    const laneLen = Math.min(7, laneEnd - 1);
+    if(laneLen > 2.5){
+      if(!RT._chevTex){
+        const cc = document.createElement('canvas'); cc.width = 128; cc.height = 128;
+        const cx2 = cc.getContext('2d');
+        cx2.clearRect(0,0,128,128);
+        cx2.fillStyle = 'rgba(255,170,20,1)';
+        cx2.beginPath();
+        // chevron pointing "up" in texture space (+v) → toward the gap
+        cx2.moveTo(64, 14); cx2.lineTo(112, 62); cx2.lineTo(84, 62);
+        cx2.lineTo(84, 112); cx2.lineTo(44, 112); cx2.lineTo(44, 62);
+        cx2.lineTo(16, 62); cx2.closePath(); cx2.fill();
+        RT._chevTex = new THREE.CanvasTexture(cc);
+        RT._chevTex.wrapS = RT._chevTex.wrapT = THREE.RepeatWrapping;
+      }
+      const lane = new THREE.Mesh(_GEO.plane, new THREE.MeshBasicMaterial({
+        map: RT._chevTex, transparent:true, opacity:0.9, depthWrite:false, toneMapped:false
+      }));
+      lane.rotation.set(-Math.PI/2, 0, Math.PI);   // chevrons point +z, toward the gap
+      lane.scale.set(w - 0.8, laneLen, 1);   // spans the road (w = gap width incl. shoulders)
+      lane.position.set(cx, 0.03, laneEnd - laneLen/2);
+      // texture v runs along the strip; repeat so ~2m per chevron
+      lane.material.map = RT._chevTex.clone();
+      lane.material.map.needsUpdate = true;
+      lane.material.map.repeat.set(Math.max(1, Math.round(lane.scale.x/2.4)), Math.max(1, Math.round(laneLen/2)));
+      lane.material.map.wrapS = lane.material.map.wrapT = THREE.RepeatWrapping;
+      g.add(lane);
+      RT.anims.push(function(t){
+        lane.material.map.offset.y = (t*1.3) % 1;          // streams toward the gap
+        lane.material.opacity = 0.8 + 0.15*Math.sin(t*3.2);
+      });
+    }
   }
   // water glow panel just under the hole — makes the drop read as WATER even
   // at shallow viewing angles (the road slab hides it from the sides)
@@ -1006,6 +1014,23 @@ function voidBands(L){
   return merged;
 }
 
+// z-range of the chevron approach lane in front of each gap (same rule as
+// buildGap: stops before the first launch pad within 12m of the edge)
+function approachLanes(L){
+  const out = [];
+  for(const o of L.obstacles){
+    if(o.k !== 'gap') continue;
+    const z0 = o.z[0];
+    let laneEnd = z0 - 0.4;
+    for(const b of L.obstacles){
+      if(b.k !== 'boost' && b.k !== 'bounce') continue;
+      if(b.z + (b.d||b.r||1)/2 < z0 && b.z > z0 - 12) laneEnd = Math.min(laneEnd, b.z - (b.d||b.r||1)/2 - 0.4);
+    }
+    const laneLen = Math.min(7, laneEnd - 1);
+    if(laneLen > 2.5) out.push([laneEnd - laneLen, laneEnd]);
+  }
+  return out;
+}
 function buildLevel(index){
   const L = window.LEVELS[index];
   resetRuntime();
@@ -1048,11 +1073,13 @@ function buildLevel(index){
     }
   }
 
-  // subtle center lane stripes (skip voids)
+  // subtle center lane stripes (skip voids and the chevron approach lanes)
+  const lanes = approachLanes(L);
+  const inLane = z => lanes.some(ln => z >= ln[0] - 0.3 && z <= ln[1] + 0.3);
   const stripes = Math.ceil(z1/2);
   for(let i=0;i<stripes;i++){
     const zs = i*2+1;
-    if(inBand(zs, 0.3)) continue;
+    if(inBand(zs, 0.3) || inLane(zs)) continue;
     const s = makeBox(wRoad*0.42, 0.026, 0.5, i%2?PAL.candyPink:PAL.candyBlue, {rough:0.65, emissive:0x120a26, ei:0.28});
     s.position.set((x0+x1)/2, 0.015, zs);
     g.add(s);
