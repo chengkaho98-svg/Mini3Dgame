@@ -7,6 +7,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 const T = THREE;
 const LVL = window.LEVELS || [];
@@ -111,6 +112,11 @@ function initRenderer(){
   S.renderer.shadowMap.type = T.PCFSoftShadowMap;
   S.renderer.toneMapping = T.ACESFilmicToneMapping;
   S.renderer.toneMappingExposure = 1.06;
+  // image-based lighting: a neutral studio room prefiltered for PBR materials.
+  // Gives every surface soft reflections + ambient fill without any HDR download.
+  const pmrem = new T.PMREMGenerator(S.renderer);
+  S.envMap = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  pmrem.dispose();
   S.camera = new T.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 320);
   S.camera.position.set(0,6,-8);
   addEventListener('resize', onResize);
@@ -133,8 +139,10 @@ function buildComposer(){
 }
 
 function makeLights(scene, L){
-  const hemi = new T.HemisphereLight(0xffffff, 0x6688cc, 0.85);
-  scene.add(hemi);
+  // theme-tinted IBL: the neutral room map tinted toward the level's sky/fog
+  // (cheap: one shared env map, per-scene tint via background/environment color)
+  scene.environment = S.envMap;
+  const hemi = new T.HemisphereLight(0xffffff, 0x6688cc, 0.55);
   const sun = new T.DirectionalLight(0xfff2dd, 1.15);
   sun.position.set(14, 26, -12);
   sun.castShadow = true;
@@ -289,16 +297,25 @@ function buildBean(colorHex, name, isHuman){
   const inner = new T.Group();
   g.add(inner);
   const col = new T.Color(colorHex);
-  const body = new T.Mesh(GEO.cap, new T.MeshStandardMaterial({color:col, roughness:0.42, metalness:0.03, emissive:col.clone().multiplyScalar(0.1)}));
+  const body = new T.Mesh(GEO.cap, new T.MeshPhysicalMaterial({
+    color:col, roughness:0.38, metalness:0.02,
+    emissive:col.clone().multiplyScalar(0.1),
+    envMapIntensity:0.85,           // strong IBL for the sugar-shell sheen
+    clearcoat:1.0, clearcoatRoughness:0.14,
+    sheen:0.35, sheenRoughness:0.6, sheenColor:col.clone().lerp(new T.Color(0xffffff), 0.6)
+  }));
   body.position.y = CY_H/2;
   body.castShadow = true;
   inner.add(body);
-  const belly = new T.Mesh(GEO.sph, new T.MeshStandardMaterial({color:0xffffff, roughness:0.15, metalness:0.05, transparent:true, opacity:0.35}));
+  const belly = new T.Mesh(GEO.sph, new T.MeshPhysicalMaterial({
+    color:0xffffff, roughness:0.1, metalness:0.0, transparent:true, opacity:0.32,
+    envMapIntensity:1.0, clearcoat:1.0, clearcoatRoughness:0.08
+  }));
   belly.position.set(0, CY_H*0.62, 0.26);
   belly.scale.set(1,1.28,0.4);
   inner.add(belly);
-  const eyeW = new T.MeshStandardMaterial({color:0xffffff, roughness:0.25});
-  const eyeB = new T.MeshStandardMaterial({color:0x1a1a24, roughness:0.3});
+  const eyeW = new T.MeshPhysicalMaterial({color:0xffffff, roughness:0.12, envMapIntensity:1.0, clearcoat:1.0, clearcoatRoughness:0.05});
+  const eyeB = new T.MeshPhysicalMaterial({color:0x1a1a24, roughness:0.1, envMapIntensity:1.0, clearcoat:1.0, clearcoatRoughness:0.05});
   for(let s of [-1,1]){
     const ew = new T.Mesh(GEO.small, eyeW);
     ew.position.set(s*0.16, CY_H*0.72, 0.33);
@@ -308,8 +325,8 @@ function buildBean(colorHex, name, isHuman){
     eb.position.set(s*0.17, CY_H*0.74, 0.42);
     inner.add(eb);
   }
-  const footM = new T.MeshStandardMaterial({color:col.clone().multiplyScalar(0.72), roughness:0.5});
-  const armM = new T.MeshStandardMaterial({color:col.clone().multiplyScalar(0.9), roughness:0.45});
+  const footM = new T.MeshPhysicalMaterial({color:col.clone().multiplyScalar(0.72), roughness:0.45, envMapIntensity:0.7, clearcoat:0.7, clearcoatRoughness:0.2});
+  const armM = new T.MeshPhysicalMaterial({color:col.clone().multiplyScalar(0.9), roughness:0.4, envMapIntensity:0.8, clearcoat:0.9, clearcoatRoughness:0.16});
   const legL = new T.Mesh(GEO.foot, footM); legL.scale.set(0.85,0.6,1.3); legL.castShadow = true;
   const legR = new T.Mesh(GEO.foot, footM); legR.scale.set(0.85,0.6,1.3); legR.castShadow = true;
   legL.position.set(-0.18, 0.09, 0.05); legR.position.set(0.18, 0.09, 0.05);
@@ -392,8 +409,9 @@ const KB_MAPS = [
 ];
 const KB_NAMES = ['WASD', '↑↓←→', 'IJKL', 'TFGH'];
 const keys = {};
+const ALL_KB_CODES = new Set(KB_MAPS.flatMap(m => [...m.left, ...m.right, ...m.up, ...m.down, ...m.jump, ...m.dive]));
 addEventListener('keydown', e=>{
-  if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  if(ALL_KB_CODES.has(e.code)) e.preventDefault();   // no page scroll / button re-trigger
   keys[e.code] = true;
   if(e.code === 'Escape') togglePause();
   // lobby join: any key belonging to keyboard maps 1..3 while in menu
@@ -469,7 +487,7 @@ function mkBody(){
   return {
     pos:new T.Vector3(), vel:new T.Vector3(),
     upright:true, fallT:0, tripSev:0, dive:false, diveT:0,
-    coyote:0, jumpLatch:false, squash:0, grounded:false, groundBoard:null,
+    coyote:0, jumpLatch:false, jumpBuf:0, squash:0, grounded:false, groundBoard:null,
     glueMul:1, whackCd:-9, bumpCd:0, boostCd:0, speedMul:1, inFan:false,
     animT:0, runPhase:0, faceYaw:0
   };
@@ -567,17 +585,20 @@ function stepBody(B, intent, dt, r){
     if(B.diveT > 0.55){ B.dive = false; tripBody(B, 0.5); }
   }
 
-  // --- jump ---
-  if(intent.jump && !B.jumpLatch){
-    if(B.upright && (wasGrounded || B.coyote > 0)){
-      B.vel.y = JUMP_V;
-      B.coyote = 0;
-      B.jumpLatch = true;
-      B.squash = -0.35;
-      if(r && r.kind==='human') AU.jump();
-    }
+  // --- jump: buffered + coyote-time (kills input latency and "couldn't jump" feels) ---
+  // jumpBuf: a press made up to 0.15s before landing is remembered and fires
+  //          on touchdown; coyote: a press just after leaving a ledge still works
+  if(intent.jump && !B.jumpHeld) B.jumpBuf = 0.15;     // rising edge only
+  B.jumpHeld = !!intent.jump;
+  B.jumpBuf = Math.max(0, B.jumpBuf - dt);
+  if(B.jumpBuf > 0 && B.upright && (wasGrounded || B.coyote > 0) && !B.dive){
+    B.vel.y = JUMP_V;
+    B.coyote = 0;
+    B.jumpBuf = 0;
+    B.squash = -0.35;
+    B.grounded = false;
+    if(r && r.kind==='human') AU.jump();
   }
-  if(!intent.jump) B.jumpLatch = false;
 
   // --- fan updraft vs gravity ---
   const fan = API.fanAt(B.pos.x, B.pos.z);
@@ -649,10 +670,11 @@ function stepBody(B, intent, dt, r){
   }
   // squash spring
   B.squash += (0 - B.squash)*Math.min(1, dt*11);
+  B.graceT = Math.max(0, (B.graceT||0) - dt);
 }
 
 function tripBody(B, sev){
-  if(!B.upright) return;
+  if(!B.upright || (B.graceT||0) > 0) return;
   B.upright = false;
   B.fallT = 0;
   B.tripSev = sev||1;
@@ -693,7 +715,7 @@ function resolveSolids(B, r){
         }
         continue;
       }
-      if(now - B.whackCd > 0.6){
+      if(now - B.whackCd > 0.6 && (B.graceT||0) <= 0){
         B.whackCd = now;
         if(tag === 'roller'){
           const bx = c._lx !== undefined ? c._lx : (c.min.x+c.max.x)/2;
@@ -778,10 +800,14 @@ function separateRacers(){
 }
 
 // ================= fall & respawn =================
-function safeSpot(x, z){
+function safeSpot(x, z, human){
   const g = API.groundAt(x, z, 3);
   if(g.y < 0) return false;
   if(g.board && (g.board.bounce || g.board.disabled)) return false;
+  // humans only: never respawn on a surface that pushes you on its own — a
+  // boost pad right before a gap would relaunch you into the void and loop
+  // the respawn forever (the "fall again right after respawn" bug)
+  if(human && g.board && (g.board.boost || g.board.belt)) return false;
   if(g.board && g.board.type === 'tile' && g.board.state !== 'idle') return false;
   const L = LVL[S.levelIdx];
   const rx = API.roadXAt(z);
@@ -795,14 +821,37 @@ function safeSpot(x, z){
   }
   return true;
 }
+// true when a boost/bounce pad sits within `ahead` metres in front of (x, z)
+function launchPadAhead(x, z, ahead){
+  for(const b of API.RT.boards){
+    if(!(b.boost || b.bounce) || b.disabled) continue;
+    if(Math.abs(b.x - x) > (b.hx||1) + 0.5) continue;
+    if(b.z + (b.hz||1) > z - 0.3 && b.z - (b.hz||1) < z + ahead) return true;
+  }
+  return false;
+}
+// true when any point within `clear` metres ahead/around (x, z) is over void
+function nearVoidEdge(x, z, clear){
+  for(let dz = -clear; dz <= clear; dz += 0.4){
+    for(let dx = -0.6; dx <= 0.6; dx += 0.6){
+      if(API.voidAt(x+dx, z+dz)) return true;
+    }
+  }
+  return false;
+}
 function fallRespawn(r){
   r.falls++;
   const L = LVL[S.levelIdx];
   if(r.kind==='human'){ AU.fall(); }
   if(S.particles) S.particles.burst(r.body.pos.x, -5.5, r.body.pos.z, 0x9fe8ff, 16, 1.4, 6, 8, 0.8);
   const baseZ = Math.max(L.spawn[2], r.body.pos.z - 5);
-  const rx = API.roadXAt(baseZ);
   const slots = [r.body.pos.x, 0, -1.2, 1.2, -2.4, 2.4];
+  // HUMANS get the forgiving respawn (stand up instantly, keep clear of drops
+  // and launch pads, brief invulnerability). BOTS keep the ORIGINAL behaviour
+  // (the short get-up stumble), which is what naturally staggers a crowd of
+  // bots after they fall together — changing it made them pile onto narrow
+  // platforms and shove each other off.
+  const human = r.kind === 'human';
   let found = false;
   for(let dz=0; dz<=20 && !found; dz+=0.6){
     const cz = baseZ - dz;
@@ -810,12 +859,32 @@ function fallRespawn(r){
     const rxz = API.roadXAt(cz);
     for(const sx of slots){
       const cx = Math.max(rxz[0]+0.5, Math.min(rxz[1]-0.5, sx));
-      if(safeSpot(cx, cz)){
+      let ok = safeSpot(cx, cz, human);
+      if(ok && human){
+        // stay clear of the next drop (1.6m) and of launch pads in the run-up
+        // (2.5m) so a respawn can't be auto-launched straight back into the void
+        ok = !nearVoidEdge(cx, cz, 1.6) && !launchPadAhead(cx, cz, 2.5);
+      }
+      if(ok){
         const g = API.groundAt(cx, cz, 3);
         r.body.pos.set(cx, Math.max(0.05, g.y+0.02), cz);
         r.body.vel.set(0,0,0);
-        r.body.upright = false; r.body.fallT = 0; r.body.tripSev = 0.35;
         r.body.dive = false;
+        r.body.coyote = 0;
+        if(human){
+          // full control at once — no get-up lockout, no stale jump state.
+          // Feet go exactly on the surface and coyote is primed, so a jump
+          // pressed the instant you respawn works on the very first frame.
+          r.body.pos.y = Math.max(0, g.y);
+          r.body.grounded = true; r.body.coyote = 0.12;
+          r.body.upright = true; r.body.fallT = 0; r.body.tripSev = 0; r.body.diveT = 0;
+          r.body.jumpHeld = false; r.body.jumpBuf = 0;
+          r.body.graceT = 0.8;
+        } else {
+          // original bot behaviour, untouched
+          r.body.upright = false; r.body.fallT = 0; r.body.tripSev = 0.35;
+          r.body.graceT = 0;
+        }
         found = true;
         break;
       }
@@ -824,9 +893,15 @@ function fallRespawn(r){
   if(!found){
     r.body.pos.set(L.spawn[0], L.spawn[1]+0.02, L.spawn[2]);
     r.body.vel.set(0,0,0);
-    r.body.upright = true; r.body.fallT = 0;
+    if(human){
+      r.body.upright = true; r.body.fallT = 0; r.body.tripSev = 0;
+      r.body.dive = false; r.body.jumpHeld = false; r.body.jumpBuf = 0;
+      r.body.graceT = 0.8;
+    } else {
+      r.body.upright = true; r.body.fallT = 0;
+      r.body.graceT = 0;
+    }
   }
-  if(r.kind==='human') toast('💦 落水了！返回安全位置');
 }
 
 // ================= race flow =================

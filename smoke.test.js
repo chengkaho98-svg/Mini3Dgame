@@ -22,6 +22,7 @@ global.window = {
     CylinderGeometry: function(){}, ConeGeometry: function(){},
     TorusGeometry: function(){}, PlaneGeometry: function(){},
     MeshStandardMaterial: function(o){ this.color=o&&o.color; this.emissive=0; },
+    MeshPhysicalMaterial: function(o){ this.color=o&&o.color; this.emissive=0; },
     MeshBasicMaterial: function(o){ this.color=o&&o.color; },
     Mesh: function(g,m){ const o = mkGroup(); o.material = m || null; return o; },
     Sprite: function(){ return mkGroup(); },

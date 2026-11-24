@@ -117,6 +117,29 @@ function createBrain(id, skill){
       // Scan ahead for the PHYSICAL edge (first break in support under our
       // feet) rather than trusting void-band bookkeeping — this is correct on
       // discs (platform edge ≠ band end), moving platforms and tile bridges.
+      // PAD AIM: only when a bounce pad is THE way across a drop — i.e. the
+      // pad sits on solid ground and the road ends within 2.5m past it.
+      // (Island bounce chains are excluded: there the pad is the landing spot
+      // of a jump, not a walk-on launcher, and hijacking the controller there
+      // stops the bot from ever jumping.)
+      let padAim = null;
+      for(const b of API.RT.boards){
+        if(!b.bounce || b.disabled) continue;
+        if(b.z > B.pos.z + 0.5 && b.z - B.pos.z < 6 && Math.abs(b.x - B.pos.x) < 3.2){
+          // ground must continue for ~1m before the pad (walk-on, not an island)
+          const groundBefore = API.groundAt(b.x, b.z - b.hz - 0.8, b.y + 0.6).y > -1;
+          // and must end shortly after it
+          let endsAfter = false;
+          for(let z = b.z + b.hz; z < b.z + b.hz + 2.5; z += 0.25){
+            if(API.groundAt(b.x, z, b.y + 0.6).y < -1){ endsAfter = true; break; }
+          }
+          if(groundBefore && endsAfter && (!padAim || b.z < padAim.z)) padAim = b;
+        }
+      }
+      if(padAim && B.pos.z < padAim.z + padAim.hz){
+        const mxAim = Math.max(-0.9, Math.min(0.9, (padAim.x - B.pos.x)*1.6));
+        return brain.finish(mxAim, Math.max(0.35, Math.sqrt(Math.max(0.1, 1 - mxAim*mxAim))), false, false);
+      }
       let physEdge = null, lastHad = true;
       for(let z = B.pos.z + 0.3; z < B.pos.z + 7.5; z += 0.25){
         const has = API.groundAt(B.pos.x, z, B.pos.y + 0.45).y > -1;

@@ -32,18 +32,28 @@ window._PAL = PAL;
 
 // ---------- material helpers ----------
 const MAT_CACHE = new Map();
+// IBL strength per material (r160 has no scene.environmentIntensity, so the
+// intensity lives on the material). Low for matte scenery, higher for gloss.
+const ENV_INTENSITY = 0.42;
 function mat(color, opts){
   opts = opts || {};
   const key = color + '|' + JSON.stringify(opts);
   if(MAT_CACHE.has(key)) return MAT_CACHE.get(key);
-  const m = new THREE.MeshStandardMaterial({
+  // MeshPhysicalMaterial: same look as Standard, plus a candy-shell clearcoat
+  // (opt-in via opts.candy for the glossy props — beans, balls, gems, pads)
+  const candy = !!opts.candy;
+  const rough = opts.rough !== undefined ? opts.rough : 0.65;
+  const m = new THREE.MeshPhysicalMaterial({
     color: color,
-    roughness: opts.rough !== undefined ? opts.rough : 0.65,
+    roughness: rough,
     metalness: opts.metal !== undefined ? opts.metal : 0.02,
     emissive: opts.emissive !== undefined ? opts.emissive : 0x000000,
     emissiveIntensity: opts.ei !== undefined ? opts.ei : 1.0,
     transparent: !!opts.transparent,
-    opacity: opts.opacity !== undefined ? opts.opacity : 1.0
+    opacity: opts.opacity !== undefined ? opts.opacity : 1.0,
+    envMapIntensity: ENV_INTENSITY + (candy ? 0.38 : 0),
+    clearcoat: candy ? 0.85 : 0.0,
+    clearcoatRoughness: candy ? 0.18 : 1.0
   });
   MAT_CACHE.set(key, m);
   return m;
@@ -124,7 +134,7 @@ function buildMill(g, L, o){
   const hub = new THREE.Group();
   hub.position.set(o.x, hubY, o.z);
   g.add(hub);
-  hub.add(makeBall(0.55, PAL.candyYellow, {rough:0.4}));
+  hub.add(makeBall(0.55, PAL.candyYellow, {rough:0.4, candy:true}));
   const colors = [PAL.candyPink, PAL.candyBlue, PAL.candyYellow];
   for(let i=0;i<3;i++){
     const holder = new THREE.Group();
@@ -133,7 +143,7 @@ function buildMill(g, L, o){
     holder.add(b);
     holder.rotation.z = i * (Math.PI*2/3);
     hub.add(holder);
-    const tip = makeBall(0.3, PAL.candyWhite);
+    const tip = makeBall(0.3, PAL.candyWhite, {rough:0.3, candy:true});
     tip.position.set(0, r - 0.25, 0);
     holder.add(tip);
   }
@@ -169,7 +179,7 @@ function buildRoller(g, L, o){
   const r = o.r || 1.15, speed = o.speed || 2.8, phase = o.phase || 0;
   const z = o.z;
   const xA = L.road[0][0] + r*0.25, xB = L.road[1][0] - r*0.25;
-  const b = makeBall(r, PAL.candyOrange, {rough:0.3, emissive:0x442200, ei:0.4});
+  const b = makeBall(r, PAL.candyOrange, {rough:0.28, emissive:0x442200, ei:0.4, candy:true});
   b.position.set(o.x, r*0.97, z);
   b.castShadow = true;
   g.add(b);
@@ -224,7 +234,7 @@ function buildElevator(g, L, o){
 // --- bounce pad ---
 function buildBounce(g, L, o){
   const r = o.r || 1.2, power = o.power || 11;
-  const pad = makeCyl(r, 0.3, PAL.candyGreen, {emissive:0x1d5c26, ei:0.8});
+  const pad = makeCyl(r, 0.3, PAL.candyGreen, {rough:0.35, emissive:0x1d5c26, ei:0.8, candy:true});
   pad.position.set(o.x, 0.15, o.z);
   g.add(pad);
   const arrow = makeCone(0.44, 0.7, PAL.candyWhite, {emissive:0x445544, ei:0.5});
@@ -258,7 +268,7 @@ function buildBelt(g, L, o){
 // --- bumper ---
 function buildBumper(g, L, o){
   const r = o.r || 1.0, kick = o.kick || 6;
-  const bb = makeBall(r, PAL.candyDeep, {rough:0.35, emissive:0x551122, ei:0.6});
+  const bb = makeBall(r, PAL.candyDeep, {rough:0.3, emissive:0x551122, ei:0.6, candy:true});
   bb.position.set(o.x, r*0.9, o.z);
   g.add(bb);
   const band = new THREE.Mesh(_GEO.torus, mat(PAL.candyWhite));
@@ -280,10 +290,10 @@ function buildHoney(g, L, o){
   const pool = makeBox(w, 0.22, d, PAL.honey, {rough:0.22, emissive:0x553300, ei:0.35, transparent:true, opacity:0.93});
   pool.position.set(o.x, 0.11, o.z);
   g.add(pool);
-  const dr1 = makeBall(0.45, PAL.honeyDeep);
+  const dr1 = makeBall(0.45, PAL.honeyDeep, {rough:0.15, candy:true});
   dr1.scale.y = 0.55; dr1.position.set(o.x-w*0.28, 0.26, o.z+d*0.22);
   g.add(dr1);
-  const dr2 = makeBall(0.34, PAL.honeyDeep);
+  const dr2 = makeBall(0.34, PAL.honeyDeep, {rough:0.15, candy:true});
   dr2.scale.y = 0.55; dr2.position.set(o.x+w*0.25, 0.24, o.z-d*0.24);
   g.add(dr2);
   RT.boards.push({x:o.x, z:o.z, hx:w/2, hz:d/2, y:0.22, glue:mul});
@@ -295,7 +305,7 @@ function buildRotator(g, L, o){
   const hub = new THREE.Group();
   hub.position.set(o.x, hubY, o.z);
   g.add(hub);
-  hub.add(makeBall(0.5, PAL.candyPurple));
+  hub.add(makeBall(0.5, PAL.candyPurple, {rough:0.35, candy:true}));
   for(let i=0;i<arms;i++){
     const holder = new THREE.Group();
     const arm = makeBox(r, 0.38, 0.55, PAL.candyPurple, {emissive:0x2a1140, ei:0.5});
@@ -303,7 +313,7 @@ function buildRotator(g, L, o){
     holder.add(arm);
     holder.rotation.y = i*(Math.PI*2/arms);
     hub.add(holder);
-    const tip = makeBall(0.24, PAL.candyWhite);
+    const tip = makeBall(0.24, PAL.candyWhite, {rough:0.3, candy:true});
     tip.position.x = r;
     holder.add(tip);
   }
@@ -343,7 +353,7 @@ function buildPendulum(g, L, o){
   const rod = makeBox(0.24, arm, 0.24, PAL.gunMetal);
   rod.position.y = -arm/2;
   pivot.add(rod);
-  const ball = makeBall(1.05, PAL.candyYellow, {rough:0.3});
+  const ball = makeBall(1.05, PAL.candyYellow, {rough:0.28, candy:true});
   ball.position.y = -arm - 0.5;
   ball.castShadow = true;
   pivot.add(ball);
@@ -424,7 +434,7 @@ function buildPuncher(g, L, o){
   armM.rotation.z = Math.PI/2;
   armM.position.x = 0.5;
   pivot.add(armM);
-  const glove = makeBall(0.62, PAL.red, {rough:0.3, emissive:0x551111, ei:0.5});
+  const glove = makeBall(0.62, PAL.red, {rough:0.28, emissive:0x551111, ei:0.5, candy:true});
   glove.position.x = 1.15;
   pivot.add(glove);
   const cuff = makeCyl(0.4, 0.3, PAL.candyWhite);
@@ -764,7 +774,7 @@ function buildPodium(g, L){
     const pole = makeCyl(0.16, 6.2, PAL.candyWhite);
     pole.position.set(rb[0]+s*3.1, 3.1, rb[2]);
     g.add(pole);
-    const ball = makeBall(0.42, PAL.candyPink, {emissive:0x441122, ei:0.5});
+    const ball = makeBall(0.42, PAL.candyPink, {rough:0.3, emissive:0x441122, ei:0.5, candy:true});
     ball.position.set(rb[0]+s*3.1, 6.4, rb[2]);
     g.add(ball);
   }
@@ -791,7 +801,7 @@ function buildPodium(g, L){
 function buildCoins(g, L){
   for(let i=0;i<L.coins.length;i++){
     const cc = L.coins[i];
-    const coin = new THREE.Mesh(_GEO.torus, mat(PAL.candyYellow,{emissive:0x7a5800, ei:0.9, metal:0.35, rough:0.25}));
+    const coin = new THREE.Mesh(_GEO.torus, mat(PAL.candyYellow,{emissive:0x7a5800, ei:0.9, metal:0.35, rough:0.22, candy:true}));
     coin.scale.setScalar(0.32);
     coin.position.set(cc[0], cc[1], cc[2]);
     g.add(coin);
@@ -857,7 +867,7 @@ function decorateStreet(g, L){
       const stick = makeCyl(0.07, h, PAL.candyWhite);
       stick.position.set(x, h/2, zz);
       g.add(stick);
-      const head = makeBall(rr, candyColors[Math.floor(rnd()*candyColors.length)], {rough:0.32, emissive:0x221033, ei:0.3});
+      const head = makeBall(rr, candyColors[Math.floor(rnd()*candyColors.length)], {rough:0.28, emissive:0x221033, ei:0.3, candy:true});
       head.scale.y = rr*1.12;
       head.position.set(x, h + rr*1.05, zz);
       g.add(head);
@@ -924,7 +934,7 @@ function decorateCanyon(g, L){
       rock.rotation.y = rnd()*0.8;
       g.add(rock);
       if(rnd() < 0.5){
-        const cr = makeCone(0.3+rnd()*0.3, 1.2+rnd()*1.4, PAL.mint, {emissive:0x1a5544, ei:0.5, transparent:true, opacity:0.85});
+        const cr = makeCone(0.3+rnd()*0.3, 1.2+rnd()*1.4, PAL.mint, {rough:0.2, emissive:0x1a5544, ei:0.5, transparent:true, opacity:0.85, candy:true});
         cr.position.set(x+rnd()*1.4-0.7, h-0.4, z+rnd()*2);
         cr.rotation.z = (rnd()-0.5)*0.5;
         g.add(cr);
