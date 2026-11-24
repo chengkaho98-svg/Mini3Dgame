@@ -276,6 +276,13 @@ function buildBumper(g, L, o){
   bb.add(band);
   const c = deadCollider('bumper');
   c._kick = kick; c._bump = true;
+  // The bumper is a BALL, so its footprint is resolved as a circle, not as a
+  // box: a box has a flat face, and pushing into a flat face dead-centre pins
+  // you there forever (the kick is purely backwards, so you walk straight
+  // back in). A circle always has a normal that slides you around the side.
+  c._circle = true;
+  c._cx = o.x; c._cz = o.z;
+  c._cr = r * 0.85;
   c.min.set(o.x-r*0.85, 0, o.z-r*0.85);
   c.max.set(o.x+r*0.85, r*1.8, o.z+r*0.85);
   RT.solids.push(c);

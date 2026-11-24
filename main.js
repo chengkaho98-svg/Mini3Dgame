@@ -793,18 +793,50 @@ function resolveSolids(B, r){
     // whacky obstacles: positional push + timed knock/trip
     if(tag === 'mill' || tag === 'rotor' || tag === 'pend' || tag === 'punch' ||
        tag === 'roller' || tag === 'crush' || c._bump){
-      if(m === pxL){ B.pos.x = c.min.x - r_ - 0.001; if(B.vel.x>0) B.vel.x = 0; }
+      if(c._circle){
+        // ROUND footprint (bumpers are balls). Push out along the centre
+        // normal, so contact always has a sideways component that carries
+        // you around the ball instead of pinning you on a flat face.
+        let nx = B.pos.x - c._cx, nz = B.pos.z - c._cz;
+        let d = Math.hypot(nx, nz);
+        const reach = c._cr + r_;
+        if(d >= reach){
+          // AABB overlap test hit a corner the round footprint doesn't cover
+          continue;
+        }
+        if(d < 1e-4){ nx = 0; nz = -1; d = 1; }
+        nx /= d; nz /= d;
+        B.pos.x = c._cx + nx * (reach + 0.001);
+        B.pos.z = c._cz + nz * (reach + 0.001);
+        // kill only the velocity going INTO the ball (tangential part is kept)
+        const into = B.vel.x*nx + B.vel.z*nz;
+        if(into < 0){ B.vel.x -= nx*into; B.vel.z -= nz*into; }
+        c._hitNx = nx; c._hitNz = nz;       // for the kick direction below
+      }
+      else if(m === pxL){ B.pos.x = c.min.x - r_ - 0.001; if(B.vel.x>0) B.vel.x = 0; }
       else if(m === pxR){ B.pos.x = c.max.x + r_ + 0.001; if(B.vel.x<0) B.vel.x = 0; }
       else if(m === pzL){ B.pos.z = c.min.z - r_ - 0.001; if(B.vel.z>0) B.vel.z = 0; }
       else { B.pos.z = c.max.z + r_ + 0.001; if(B.vel.z<0) B.vel.z = 0; }
       if(c._bump){
         if(now - (B.bumpCd||0) > 0.35){
           B.bumpCd = now;
-          const cx2 = (c.min.x+c.max.x)/2, cz2 = (c.min.z+c.max.z)/2;
-          const dx = B.pos.x-cx2, dz = B.pos.z-cz2;
-          const dl = Math.max(0.05, Math.hypot(dx,dz));
-          B.vel.x = dx/dl*c._kick;
-          B.vel.z = dz/dl*c._kick;
+          // kick along the contact normal (falls back to centre-to-body)
+          let kx = c._hitNx, kz = c._hitNz;
+          if(kx === undefined){
+            kx = B.pos.x - c._cx; kz = B.pos.z - c._cz;
+            const kl = Math.max(0.05, Math.hypot(kx, kz)); kx /= kl; kz /= kl;
+          }
+          // HEAD-ON KICK: when the normal is almost purely front-to-back, a
+          // straight-back kick returns you to the same spot and you walk
+          // straight back in — forever. Lean the kick ~28° toward the side
+          // you are steering so the rebound clears the ball's edge.
+          if(Math.abs(kx) < 0.14){
+            const side = (B.vel.x > 0.05) ? 1 : (B.vel.x < -0.05) ? -1 : 1;
+            const zSign = kz >= 0 ? 1 : -1;
+            kx = side * 0.47; kz = zSign * 0.883;
+          }
+          B.vel.x = kx*c._kick;
+          B.vel.z = kz*c._kick;
           B.vel.y = Math.max(B.vel.y, 3.2);
           if(r && r.kind==='human') AU.boing();
           if(S.particles) S.particles.burst(B.pos.x, B.pos.y+0.5, B.pos.z, 0xff5c9d, 8, 0.6, 2, 3, 0.4);
@@ -1049,10 +1081,12 @@ function startRace(idx){
     S.scene.add(r.mesh);
   });
   // one follow-camera per human racer (split-screen when 2+)
+  clearViewComposers();
   rebuildViews();
   updateSplitLines();
 
   S.worldT = 0; S.raceClock = 0; S.tLeft = L.time;
+  if(window.SRR_ANALYTICS && window.SRR_ANALYTICS.reset) window.SRR_ANALYTICS.reset();
   S.finishCount = 0; S.endGraceT = 0; S.extendT = 0;
   S.phase = 'countdown'; S.countdownT = 3.4; S.paused = false;
   S.camYaw = Math.PI; S.camPitch = 0.46; S.camDist = 9.5; S.camShake = 0;
@@ -1217,8 +1251,32 @@ function makeView(racer){
     racer,
     cam: new T.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 320),
     yaw: Math.PI, pitch: 0.46, dist: 9.5,
-    tgt: new T.Vector3()
+    tgt: new T.Vector3(),
+    comp: null, compW: 0, compH: 0
   };
+}
+// One post chain per split viewport (SSAO + bloom), drawn straight into a
+// scissored region of the screen. The last pass must not clear, otherwise it
+// wipes the columns already drawn next to it.
+function buildViewComposer(v, w, h){
+  try{
+    const c = new EffectComposer(S.renderer);
+    c.setSize(w, h);
+    c.addPass(new RenderPass(S.scene, v.cam));
+    if(SSAO_ON){
+      const ssao = new SSAOPass(S.scene, v.cam, w, h);
+      ssao.kernelRadius = 0.55; ssao.minDistance = 0.001; ssao.maxDistance = 0.14;
+      c.addPass(ssao);
+    }
+    c.addPass(new UnrealBloomPass(new T.Vector2(w, h), 0.32, 0.62, 0.82));
+    c.addPass(new OutputPass());
+    return c;
+  }catch(e){ console.warn('view composer unavailable', e); return null; }
+}
+function disposeViewComposer(v){
+  if(!v.comp) return;
+  try{ v.comp.passes.forEach(p=>{ if(p.dispose) p.dispose(); }); v.comp.dispose(); }catch(e){}
+  v.comp = null; v.compW = 0; v.compH = 0;
 }
 function rebuildViews(){
   S.views = [];
@@ -1229,6 +1287,9 @@ function rebuildViews(){
     S.camera = S.views[0].cam;   // menu / solo path shares view0's camera
     S.composer = null;           // composer caches the camera — rebuild
   }
+}
+function clearViewComposers(){
+  if(S.views) for(const v of S.views) disposeViewComposer(v);
 }
 function updateFollowCam(v, dt){
   if(!v.racer) return;
@@ -1256,15 +1317,33 @@ function renderRace(dt){
     // ALL VERTICAL SPLITS: one full-height column per player, side by side
     const n = Math.min(humans.length, S.views.length);
     const R = S.renderer;
+    const vw = innerWidth/n, vh = innerHeight;
+    const usePost = FX_QUALITY === 'high';
     R.setScissorTest(true);
     for(let i=0;i<n;i++){
       const v = S.views[i];
-      const vw = innerWidth/n, px = i*vw, vh = innerHeight, py = 0;
-      R.setViewport(px, py, vw, vh);
-      R.setScissor(px, py, vw, vh);
+      const px = i*vw, py = 0;
       updateFollowCam(v, dt);
       v.cam.aspect = vw/vh;
       v.cam.updateProjectionMatrix();
+      if(usePost){
+        // (re)build this view's chain when it is missing or was resized
+        if(!v.comp || v.compW !== vw || v.compH !== vh){
+          disposeViewComposer(v);
+          v.comp = buildViewComposer(v, vw, vh);
+          v.compW = vw; v.compH = vh;
+        }
+        if(v.comp){
+          // the chain renders full-target; confine it to this column
+          R.setRenderTarget(null);
+          R.setViewport(px, py, vw, vh);
+          R.setScissor(px, py, vw, vh);
+          v.comp.render();
+          continue;
+        }
+      }
+      R.setViewport(px, py, vw, vh);
+      R.setScissor(px, py, vw, vh);
       R.render(S.scene, v.cam);
     }
     R.setScissorTest(false);
@@ -1398,21 +1477,30 @@ function updateHUD(dt){
     return progOf(b) - progOf(a);
   });
   let html = '';
+  const AN = window.SRR_ANALYTICS;
+  const winOf = (r) => (AN && AN.racers.get(r)) ? (AN.racers.get(r).win || 0) : 0;
+  const standings = (AN && AN.standings) ? AN.standings(racers) : null;
   order.forEach((r,i)=>{
     const pct = Math.min(1, progOf(r))*100;
+    const w = winOf(r);
+    const rankOf = standings ? standings.findIndex(x=>x.r === r) + 1 : (i+1);
     html += '<div class="rrow'+(r.kind==='human'?' me':'')+(r.finished?' fin':'')+'">'+
-      '<span class="rp'+(r.kind==='human'?' me':'')+'">'+(r.finished?'🏆':(i+1))+'</span>'+
+      '<span class="rp'+(r.kind==='human'?' me':'')+'">'+(r.finished?'🏆':rankOf)+'</span>'+
       '<span class="dot" style="background:'+r.colorHex+'"></span>'+
       '<span class="nm">'+r.name+'</span>'+
       (r.finished ? '<span class="rk">'+r.finishTime.toFixed(1)+'s</span>'
-                  : '<span class="pb"><i style="width:'+pct.toFixed(0)+'%"></i></span>')+
+                  : '<span class="pb" title="勝率 '+w.toFixed(0)+'%"><i class="win" style="width:'+Math.max(4, w).toFixed(0)+'%"></i></span>'+
+                    '<span class="wp">'+w.toFixed(0)+'%</span>')+
       '</div>';
   });
   UI.rankList.innerHTML = html;
   const meIdx = order.findIndex(r=>r.kind==='human');
-  UI.rankBox.querySelector('.rt').textContent = meIdx>=0
-    ? '🏁 即時排名 · 你第 '+(meIdx+1)+' / '+racers.length
-    : '🏁 即時排名';
+  const meR = meIdx >= 0 ? order[meIdx] : null;
+  const meW = meR ? winOf(meR) : 0;
+  const livePos = standings ? standings.findIndex(x=>x.human) + 1 : (meIdx + 1);
+  UI.rankBox.querySelector('.rt').textContent = meR
+    ? '🏁 AI 勝率 · 你第 '+livePos+'/'+racers.length+' · '+(meR.finished ? '已衝線' : meW.toFixed(0)+'%')
+    : '🏁 AI 勝率';
   // P1 stats box
   if(p1){
     UI.stBox.innerHTML = '<div>👥 <b>'+racers.length+'</b> 人混戰</div>'+
@@ -1520,6 +1608,21 @@ function wireButtons(){
   if(UI.fxSel){
     UI.fxSel.onchange = ()=>{ FX_QUALITY = UI.fxSel.value; S.composer = null; };
   }
+  // AI commentator toggle: only enable once the local model answers
+  const commBox = $('aiComm'), commStatus = $('aiStatus');
+  if(commBox && window.SRR_COMMENTATOR){
+    const C = window.SRR_COMMENTATOR;
+    const paint = ()=>{
+      commStatus.textContent = C.health === 'ok'
+        ? ('✅ 已連接 ' + (C.model || ''))
+        : C.health === 'down' ? '❌ 搵唔到本地模型（要開 server.js + vLLM）' : '偵測中…';
+      commStatus.style.color = C.health === 'ok' ? '#7ee7a2' : '#ff8a8a';
+    };
+    commBox.onchange = ()=>{ C.on = commBox.checked; if(C.on) C.lastT = -99; };
+    C.checkHealth().then(paint);
+    setInterval(()=>{ C.checkHealth().then(paint); }, 15000);
+    if(commBox.disabled !== undefined) commBox.disabled = false;
+  }
   if(UI.ccust) UI.ccust.oninput = ()=>{
     // P1 color follows the custom picker when it matches nothing
     let nearest = 0, bestD = 1e9;
@@ -1540,6 +1643,7 @@ function backToMenu(){
     disposeBean(r);
   }
   racers.length = 0;
+  clearViewComposers();
   S.views = [];
   updateSplitLines();
   buildMenuScene();
@@ -1674,6 +1778,9 @@ function frame(now){
     updateHints();
   }
   updateHUD(dt);
+  // live analytics (win% + events) — read-only, never affects the race
+  if(window.SRR_ANALYTICS) window.SRR_ANALYTICS.update(racers, S, dt);
+  if(window.SRR_COMMENTATOR) window.SRR_COMMENTATOR.update(racers, S, dt);
   // split-screen renders each viewport itself; solo renders once (bloom path)
   renderRace(dt);
 }
