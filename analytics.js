@@ -139,17 +139,32 @@ A.update = function(racers, S, dt){
     x.score = LEAD_GAIN * lead * urgency + FOCUS_GAIN * pace - 2.6 * x.fallPenalty;
     open.push({ r, x, score: x.score });
   }
-  // softmax over the still-running racers -> percentages summing to 100
+  // softmax over the still-running racers -> percentages summing to 100.
+  // The temperature widens with how much track is left: early on nobody is
+  // out of it (the leader shows a modest edge, the tail still has a real
+  // chance), and it tightens as the finish approaches. A fixed sharp
+  // temperature made 5 of 8 racers read "0%" a few seconds after the start.
+  const meanProgOpen = open.length ? open.reduce((a, o) => a + o.x.prog, 0) / open.length : 0;
+  const temp = 0.5 + 1.6 * (1 - Math.min(1, meanProgOpen));
   let mx = -Infinity; for(const o of open) mx = Math.max(mx, o.score);
   let sum = 0;
-  for(const o of open){ o.e = Math.exp((o.score - mx) / 0.55); sum += o.e; }
+  for(const o of open){ o.e = Math.exp((o.score - mx) / temp); sum += o.e; }
+  // Once anybody has crossed the line, nobody still running can finish first:
+  // the win chance among the open racers only exists while the race is still
+  // undecided (no finisher yet). After that the open racers' bars decay to 0.
+  const anyFinished = racers.some(r => r.finished);
   for(const r of racers){
     const x = A.racers.get(r); if(!x) continue;
     let target;
-    if(r.finished) target = 100;                      // already placed
-    else { const o = open.find(k => k.r === r); target = o ? 100 * o.e / Math.max(1e-9, sum) : 0; }
+    if(r.finished){
+      target = (r.finishRank === 1) ? 100 : 0;        // the winner keeps 100%
+    } else {
+      const o = open.find(k => k.r === r);
+      target = o ? 100 * o.e / Math.max(1e-9, sum) : 0;
+      if(anyFinished) target = 0;                     // first place is gone
+    }
     // smooth so the bar doesn't flicker sample to sample
-    x.win += (target - x.win) * (r.finished ? 1 : 0.5);
+    x.win += (target - x.win) * (r.finished ? 1 : 0.35);
     x.form = x.speed - meanSpeed;
     if(x.win > x.peakWin) x.peakWin = x.win;
   }

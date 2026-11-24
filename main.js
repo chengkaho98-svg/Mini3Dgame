@@ -1255,15 +1255,20 @@ function makeView(racer){
     comp: null, compW: 0, compH: 0
   };
 }
-// One post chain per split viewport (SSAO + bloom), drawn straight into a
-// scissored region of the screen. The last pass must not clear, otherwise it
-// wipes the columns already drawn next to it.
-function buildViewComposer(v, w, h){
+// One post chain per split viewport, drawn straight into a scissored region
+// of the screen. EffectComposer resizes every pass to the full viewport, so
+// SSAO cannot be run at a reduced internal resolution — and SSAO re-renders
+// the scene for depth+normals, which multiplies with the number of views.
+// Measured on the dev machine (4 views, 1280x720): plain 8.8ms, +bloom 9.3ms,
+// +SSAO 15.8ms. So: SSAO only with up to 2 views; 3-4 views keep bloom.
+// The last pass must not clear, otherwise it wipes the columns beside it.
+const SPLIT_SSAO_MAX_VIEWS = 2;
+function buildViewComposer(v, w, h, withSSAO){
   try{
     const c = new EffectComposer(S.renderer);
     c.setSize(w, h);
     c.addPass(new RenderPass(S.scene, v.cam));
-    if(SSAO_ON){
+    if(SSAO_ON && withSSAO){
       const ssao = new SSAOPass(S.scene, v.cam, w, h);
       ssao.kernelRadius = 0.55; ssao.minDistance = 0.001; ssao.maxDistance = 0.14;
       c.addPass(ssao);
@@ -1328,10 +1333,11 @@ function renderRace(dt){
       v.cam.updateProjectionMatrix();
       if(usePost){
         // (re)build this view's chain when it is missing or was resized
-        if(!v.comp || v.compW !== vw || v.compH !== vh){
+        const withSSAO = n <= SPLIT_SSAO_MAX_VIEWS;
+        if(!v.comp || v.compW !== vw || v.compH !== vh || v.compSSAO !== withSSAO){
           disposeViewComposer(v);
-          v.comp = buildViewComposer(v, vw, vh);
-          v.compW = vw; v.compH = vh;
+          v.comp = buildViewComposer(v, vw, vh, withSSAO);
+          v.compW = vw; v.compH = vh; v.compSSAO = withSSAO;
         }
         if(v.comp){
           // the chain renders full-target; confine it to this column

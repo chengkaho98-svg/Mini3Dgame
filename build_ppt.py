@@ -82,6 +82,35 @@ def step_slide(prs, n, step_no, step_title, prompt, img, img_w, outcomes, latin=
     footer(s, n, latin=latin)
     return s
 
+def flow_slide(prs, n, title, sub, nodes, notes, latin=CJK):
+    # nodes: list of (heading, line1, line2) left-to-right; arrows between
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    title_bar(s, title, sub, latin=latin)
+    k = len(nodes)
+    gap = 0.42
+    bw = (12.2 - gap * (k - 1)) / k
+    x = 0.55
+    for i, (h, a, b) in enumerate(nodes):
+        card = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(2.05), Inches(bw), Inches(2.25))
+        card.fill.solid(); card.fill.fore_color.rgb = LIGHT if i % 2 == 0 else INK
+        card.line.color.rgb = PINK; card.line.width = Pt(1.4)
+        tf = card.text_frame; tf.word_wrap = True
+        tf.margin_left = Inches(0.14); tf.margin_right = Inches(0.14); tf.margin_top = Inches(0.12)
+        p = tf.paragraphs[0]; p.alignment = PP_ALIGN.CENTER
+        r = p.add_run(); r.text = h
+        set_font(r, 16.5, True, PINK if i % 2 == 0 else YELLOW, latin=latin)
+        for ln in (a, b):
+            pp = tf.add_paragraph(); pp.alignment = PP_ALIGN.CENTER
+            rr = pp.add_run(); rr.text = ln
+            set_font(rr, 12.5, False, INK if i % 2 == 0 else SOFT, latin=latin)
+        if i < k - 1:
+            ar = s.shapes.add_shape(MSO_SHAPE.RIGHT_ARROW, Inches(x + bw + 0.07), Inches(2.95), Inches(gap - 0.14), Inches(0.45))
+            ar.fill.solid(); ar.fill.fore_color.rgb = PINK; ar.line.fill.background()
+        x += bw + gap
+    tb, tf = box(s, 0.7, 4.75, 11.9, 2.4)
+    put(tf, notes, 17, INK, space=10)
+    footer(s, n, latin)
+
 def build_deck(L, fname):
     prs = Presentation()
     prs.slide_width = Inches(13.333); prs.slide_height = Inches(7.5)
@@ -164,11 +193,15 @@ def build_deck(L, fname):
             set_font(r2, 13.5, False, INK, latin=latin)
     footer(s, 5, latin)
 
-    # 6-13 steps
+    # steps (as many as the language pack lists)
     for i, (no, tt, pr, img, iw, outs) in enumerate(L['steps']):
         step_slide(prs, 6 + i, no, tt, pr, img, iw, outs, latin=latin)
 
-    # 14 results
+    # AI analytics architecture (flow diagram), then results
+    pn = 6 + len(L['steps'])
+    flow_slide(prs, pn, L['flow_t'], L['flow_s'], L['flow_nodes'], L['flow_notes'], latin=latin)
+
+    pn += 1
     s = prs.slides.add_slide(prs.slide_layouts[6])
     title_bar(s, L['res_t'], L['res_s'], latin=latin)
     x = 0.55
@@ -197,7 +230,7 @@ def build_deck(L, fname):
     ser.format.fill.solid(); ser.format.fill.fore_color.rgb = PINK
     tb, tf = box(s, 9.5, 3.7, 3.4, 3.0)
     put(tf, L['res_note'], 16, INK, space=6)
-    footer(s, 14, latin)
+    footer(s, pn, latin)
 
     prs.save(fname)
     print('saved:', fname, '| slides:', len(prs.slides._sldIdLst))
@@ -239,7 +272,8 @@ ZH = {
    ('關卡系統', '程序化生成\n20+ 種機關 builder\n數據驅動（JSON 式）'),
    ('AI 對手', '反應式威脅場評分\n彈道跳距計算\n與玩家同一套物理'),
    ('多人分屏', '4 鍵盤即插即玩\n直式分屏渲染\n獨立跟蹤鏡頭'),
-   ('品質保障', 'Node 冒煙測試\nAI 全場模擬驗證\n自適應解析度保 60fps')],
+   ('AI 即時分析', '勝率統計模型\n事件優先級摘要\n本地 vLLM 評述'),
+   ('品質保障', 'Node 冒煙測試\nAI 全場模擬驗證\n168 情況測試矩陣')],
  'steps': [
    ('Step 1', '玩法與關卡研究',
     '「查閱《糖豆人 Fall Guys》的玩法與經典關卡機關，整理出可在 3D 賽跑遊戲中實現的機關清單與設計準則。」',
@@ -272,14 +306,46 @@ ZH = {
    ('Step 8', '自動化測試與除錯',
     '「AI 全場快進模擬（每關 9 隻機器人自動跑完全程）＋穿牆極限測試（40–60 m/s 撞牆），反覆修正直至 9/9 完成、零錯誤。」',
     '08-results.png', 7.0,
-    ['內置同步模擬器：一條指令跑完整場比賽', '機關穿板、AI 卡死、平台縫隙等 30+ 個 bug 自動捕捉', '最終狀態：5 關全部 9/9 完成、零運行時錯誤'])],
+    ['內置同步模擬器：一條指令跑完整場比賽', '機關穿板、AI 卡死、平台縫隙等 30+ 個 bug 自動捕捉', '最終狀態：5 關全部 9/9 完成、零運行時錯誤']),
+   ('Step 9', '操作手感精修',
+    '「以真實鍵盤事件建立測試床，逐項量度操作：加速帶前起跳由 0/5 修正至 5/5；撲倒可在空中使用，落地即時恢復控制（鎖定時間 1.13 秒降至 0.17 秒）。」',
+    '02-l1-gameplay.png', 7.0,
+    ['加速帶在空中經過亦會觸發，提前起跳不再必跌', '撲倒保留前進動量，頭 0.25 秒位移是純行走的 2 倍', '每個斷橋前加入全路寬流動箭頭提示帶']),
+   ('Step 10', '渲染升級：環境光與材質',
+    '「以 RoomEnvironment + PMREM 加入基於圖像的環境光，材質升級為糖衣 clearcoat 的 MeshPhysicalMaterial；加入 SSAO 接觸陰影與菲涅耳水面反射。」',
+    '10-water-ssao.jpg', 7.0,
+    ['糖豆人有頭頂高光與邊緣糖衣反光', 'SSAO 使豆子、柱腳、滾球底部貼地有重量感', '水面由密集條紋改為遠處反映天空、近處深色']),
+   ('Step 11', '玩家描邊與分屏後處理',
+    '「以反向外殼（inverted hull）為人類玩家加白色描邊，在每個分屏視角都能看見；每個分屏視圖各自一條後處理鏈。」',
+    '11-split4-post.png', 7.0,
+    ['描邊在 4 個分屏畫面同時生效，一眼認出自己的豆子', '2 人分屏保留 SSAO 與泛光，3 至 4 人自動只保留泛光', '4 人分屏實測 96 FPS（顯卡 RTX 5070 Ti）']),
+   ('Step 12', '以測試矩陣根治卡死',
+    '「建立 168 種情況的測試矩陣（8 個軟糖柱陣 × 3 個起點 × 7 種操作），每次改動都用同一矩陣驗證，直到 168/168 全部通過。」',
+    '05-l4-honey.png', 7.0,
+    ['軟糖柱碰撞由方盒改為圓形，正面撞擊不再卡死', '找出卡死成因：7 個柱子嵌入路邊，拉回後完全解決', '卡死情況由 34 個降至 0 個，跌落 0 次']),
+   ('Step 13', 'AI 即時勝率與本地 LLM 評述',
+    '「analytics.js 即時計算每位參賽者的勝率；commentator.js 每 12 秒把賽況摘要送到本地 vLLM，生成一句粵語評述顯示在畫面上。」',
+    '12-ai-commentary.png', 7.0,
+    ['勝率加總恆為 100%，領先變化、跌落水、逆轉即時反映', '本地模型 deepseek-v4.1-flash 生成評述，延遲 1.2 至 1.6 秒', '連續 5 句測試句式無重複，並以「你」稱呼玩家'])],
+ 'flow_t': 'AI 即時分析架構',
+ 'flow_s': '遊戲狀態 → 勝率評分 → 事件摘要 → 本地大模型 → 畫面評述，全程不經雲端',
+ 'flow_nodes': [
+   ('遊戲狀態', '每 0.25 秒採樣', '位置、速度、跌落'),
+   ('勝率引擎', '領先幅度＋節奏', 'softmax → 100%'),
+   ('事件摘要', '優先級＋冷卻', '只留關鍵事件'),
+   ('本地 vLLM', 'deepseek-v4.1-flash', '區域網路內推理'),
+   ('畫面評述', '每 12 秒一句', '粵語現場評述')],
+ 'flow_notes': [
+   '• 勝率評分是純統計模型（領先幅度隨剩餘賽程加重、近期跌落扣分），即時且可解釋',
+   '• 大模型只負責「講得好不好」：收到的是幾十個 token 的摘要，不是原始畫面數據',
+   '• 由伺服器端代理轉發請求，區網位址與模型名稱不寫入前端程式'],
  'res_t': '開發成果',
  'res_s': '全部指標為真實遊戲內自動化測試數據',
- 'res_cards': [('5','主題關卡'),('20+','動態機關'),('10','人混戰'),('0','穿牆事故'),('9/9','AI 完成率')],
+ 'res_cards': [('5','主題關卡'),('20+','動態機關'),('10','人混戰'),('0','卡死情況'),('168/168','柱陣測試')],
  'res_chart_cats': ['L1 糖果街','L2 泡泡工廠','L3 果凍峽谷','L4 蜂蜜危機','L5 糖霜風暴'],
  'res_chart_series': 'AI 最快完成時間（秒）',
- 'res_chart_vals': (20.9, 29.8, 37.7, 35.7, 33.8),
- 'res_note': ['每關 AI 最快 21–38 秒', '（人類約 40–70 秒完成，', '符合約 75 秒目標）'],
+ 'res_chart_vals': (21.9, 39.5, 37.9, 38.0, 32.0),
+ 'res_note': ['每關 AI 最快', '32 至 40 秒', '（人類約 60–75 秒完成）', '5 關全部 9/9 達陣'],
 }
 
 # ==================== English version ====================
@@ -319,7 +385,8 @@ EN = {
    ('Level system', 'Procedural generation\n20+ obstacle builders\nData-driven (JSON-style)'),
    ('AI opponents', 'Reactive threat-field scoring\nBallistic jump-range math\nSame physics as players'),
    ('Split-screen', '4 keyboards plug-and-play\nVertical split rendering\nIndependent follow cams'),
-   ('Quality assurance', 'Node smoke tests\nAI full-race simulation\nAdaptive resolution keeps 60fps')],
+   ('Live AI analytics', 'Statistical win model\nPriority event summary\nLocal vLLM commentary'),
+   ('Quality assurance', 'Node smoke tests\nAI full-race simulation\n168-case test matrix')],
  'steps': [
    ('Step 1', 'Gameplay & level research',
     '"Research Fall Guys gameplay and classic course obstacles; compile a list of mechanics implementable in a 3D racing game, with design guidelines."',
@@ -352,14 +419,46 @@ EN = {
    ('Step 8', 'Automated testing & debugging',
     '"AI full-race fast-forward simulation (9 bots completing each level automatically) + tunneling stress tests (40–60 m/s wall slams), iterating until 9/9 finish with zero errors."',
     '08-results.png', 7.0,
-    ['Built-in synchronous simulator: run a whole race with one command', 'Auto-caught 30+ bugs: obstacle clipping, stuck AI, platform seams…', 'Final state: all 5 levels finished 9/9, zero runtime errors'])],
+    ['Built-in synchronous simulator: run a whole race with one command', 'Auto-caught 30+ bugs: obstacle clipping, stuck AI, platform seams…', 'Final state: all 5 levels finished 9/9, zero runtime errors']),
+   ('Step 9', 'Game feel, measured',
+    '"Build a test harness on real keyboard events and measure every control: jumping early in front of a boost pad went from 0/5 to 5/5; the dive works mid-air and hands control back on touchdown (lock time 1.13s down to 0.17s)."',
+    '02-l1-gameplay.png', 7.0,
+    ['Boost pads also trigger while you fly over them, so an early jump is no longer fatal', 'The dive keeps its momentum: 2x the distance of plain running in the first 0.25s', 'A full-width streaming chevron lane now marks every drop']),
+   ('Step 10', 'Rendering: lighting and materials',
+    '"Add image-based lighting with RoomEnvironment + PMREM, upgrade materials to candy-clearcoat MeshPhysicalMaterial, and add SSAO contact shadows and Fresnel water reflection."',
+    '10-water-ssao.jpg', 7.0,
+    ['Beans get a sugar-shell sheen with rim highlights', 'SSAO seats beans, posts and rollers onto the floor with soft contact shadows', 'Water goes from busy stripes to sky reflection far out and deep colour up close']),
+   ('Step 11', 'Player outlines and split-screen post FX',
+    '"Outline human players with an inverted-hull white shell so they read in every split view, and give each split view its own post-processing chain."',
+    '11-split4-post.png', 7.0,
+    ['The outline shows in all four split views at once: spot your own bean instantly', '2-way split keeps SSAO + bloom; 3-4 views drop to bloom only', '4-way split measured at 96 FPS (RTX 5070 Ti)']),
+   ('Step 12', 'Killing the wedge with a test matrix',
+    '"Build a 168-case test matrix (8 bumper clusters x 3 start positions x 7 input patterns), re-run the same matrix after every change, until 168/168 pass."',
+    '05-l4-honey.png', 7.0,
+    ['Bumpers now collide as circles, so a head-on hit slides you off', 'Root cause found: 7 bumpers stuck out past the rail; pulling them in fixed it', 'Wedged cases went from 34 to 0, with zero falls']),
+   ('Step 13', 'Live win probability and a local-LLM commentator',
+    '"analytics.js scores every racer\'s win chance live; commentator.js sends a race summary to a local vLLM every 12s and shows one line of Cantonese commentary on screen."',
+    '12-ai-commentary.png', 7.0,
+    ['Win chances always sum to 100% and react to lead changes, falls and comebacks', 'The local deepseek-v4.1-flash model answers in 1.2-1.6s', 'Five consecutive lines with no repeated phrasing; it addresses the player as you'])],
+ 'flow_t': 'Live AI analytics architecture',
+ 'flow_s': 'Game state -> win scoring -> event summary -> local LLM -> on-screen commentary, with nothing leaving the LAN',
+ 'flow_nodes': [
+   ('Game state', 'sampled 4x a second', 'position, pace, falls'),
+   ('Win scoring', 'lead + pace', 'softmax to 100%'),
+   ('Event summary', 'priority + cooldown', 'only what matters'),
+   ('Local vLLM', 'deepseek-v4.1-flash', 'on-LAN inference'),
+   ('Commentary', 'one line / 12s', 'live Cantonese')],
+ 'flow_notes': [
+   '• Win chance is a plain statistical model (lead weighted by track remaining, recent falls penalised): instant and explainable',
+   '• The LLM only decides how to say it: it receives a few dozen tokens of summary, never raw game data',
+   '• A server-side proxy forwards the request, so LAN addresses and model names stay out of client code'],
  'res_t': 'Results',
  'res_s': 'All metrics come from real in-game automated tests',
- 'res_cards': [('5','Themed levels'),('20+','Dynamic obstacles'),('10','Racers per race'),('0','Tunneling incidents'),('9/9','AI finish rate')],
+ 'res_cards': [('5','Themed levels'),('20+','Dynamic obstacles'),('10','Racers per race'),('0','Wedged cases'),('168/168','Bumper matrix')],
  'res_chart_cats': ['L1 Candy St.', 'L2 Bubble Fac.', 'L3 Jelly Cyn.', 'L4 Honey Cr.', 'L5 Sugar St.'],
  'res_chart_series': 'AI fastest clear time (s)',
- 'res_chart_vals': (20.9, 29.8, 37.7, 35.7, 33.8),
- 'res_note': ['AI fastest per level: 21–38s', '(humans finish in ~40–70s,', 'meeting the ~75s target)'],
+ 'res_chart_vals': (21.9, 39.5, 37.9, 38.0, 32.0),
+ 'res_note': ['AI fastest per level:', '32-40s', '(humans finish in ~60-75s)', '9/9 finish on all 5 levels'],
 }
 
 build_deck(ZH, '糖糖大亂鬥_AI開發Playbook.pptx')
