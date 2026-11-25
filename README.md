@@ -6,9 +6,12 @@
 
 ![cover](cover.jpg)
 
-## 🎮 線上玩
+## 🎬 線上玩
 
-**https://chengkaho98-svg.github.io/Mini3Dgame/** — 開個網址即玩，唔使安裝。
+**https://chengkaho98-svg.github.io/Mini3Dgame/**
+
+每次 push 到 `main` 都會自動重新發佈（`.github/workflows/pages.yml`，只打包遊戲檔）。
+首次使用要在 repo 做一次性設定：**Settings → Pages → Build and deployment → Source 揀「GitHub Actions」**。
 （AI 評述要本地模型，線上版冇；其餘功能一樣。）
 
 本機執行：

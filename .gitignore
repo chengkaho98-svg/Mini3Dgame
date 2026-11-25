@@ -9,3 +9,6 @@ compare/
 dist/
 # slide previews rendered by render_ppt.ps1 (regenerate any time; ~22 MB)
 ppt-render*/
+
+# scratch output of tools/ppt_orphans.ps1
+ppt-orphans.txt
