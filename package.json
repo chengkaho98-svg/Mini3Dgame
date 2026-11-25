@@ -1,0 +1,16 @@
+{
+  "name": "sugar-rush-royale",
+  "version": "2.0.0",
+  "description": "糖糖大亂鬥 SUGAR RUSH ROYALE — a Fall Guys style 3D candy racing web game: 5 levels, 20 obstacle kinds, 4-player local split-screen on one keyboard, AI bots, live win-chance analytics and a local-LLM Cantonese commentator.",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/geometry.test.js && node tests/levels.test.js && node tests/dom-contract.test.js && node tests/run.js",
+    "test:node": "node tests/geometry.test.js && node tests/levels.test.js && node tests/dom-contract.test.js",
+    "test:browser": "node tests/run.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

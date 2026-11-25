@@ -104,6 +104,14 @@ const RT = {
 };
 window._RT = RT;
 
+// Per-build GPU resources (not shared through _GEO / MAT_CACHE). Everything
+// created here is released by disposeLevel() when the level is torn down.
+RT._own = [];
+function own(res){ RT._own.push(res); return res; }
+function disposeLevel(){
+  for(let i=0;i<RT._own.length;i++){ try{ RT._own[i].dispose(); }catch(e){} }
+  RT._own.length = 0;
+}
 function resetRuntime(){
   RT.solids.length = 0;
   RT.anims.length = 0;
@@ -112,6 +120,7 @@ function resetRuntime(){
   RT.fans.length = 0;
   RT.narrows.length = 0;
   RT.collectors.length = 0;
+  RT._own.length = 0;
 }
 function addSolidBox(cx,cy,cz,hx,hy,hz,tag){
   RT.solids.push({
@@ -127,8 +136,10 @@ function deadCollider(tag){
 // ================= obstacle builders =================
 
 // --- candy windmill: 3 blades rotating in XY plane at fixed z ---
-// Hub is placed so the lowest blade tip sweeps just above the floor
-// (tip clearance 0.15m — never clips through the road slab).
+// Hub height leaves 0.15m under the COLLIDER sweep; visually the blade ends
+// in its white tip ball, whose underside clears the road by 0.10m. (The blade
+// box must stop at the ball's centre — any longer and its end dips into the
+// road at the bottom of every rotation.)
 function buildMill(g, L, o){
   const r = o.r, hubY = r + 0.15, speed = o.speed || 0.9;
   const hub = new THREE.Group();
@@ -138,8 +149,8 @@ function buildMill(g, L, o){
   const colors = [PAL.candyPink, PAL.candyBlue, PAL.candyYellow];
   for(let i=0;i<3;i++){
     const holder = new THREE.Group();
-    const b = makeBox(0.5, r, 0.22, colors[i], {emissive:0x331122, ei:0.35});
-    b.position.y = r*0.5 + 0.3;
+    const b = makeBox(0.5, r - 0.55, 0.22, colors[i], {emissive:0x331122, ei:0.35});
+    b.position.y = (r + 0.05)*0.5;          // spans 0.3 .. r-0.25 (the tip ball centre)
     holder.add(b);
     holder.rotation.z = i * (Math.PI*2/3);
     hub.add(holder);
@@ -180,7 +191,9 @@ function buildRoller(g, L, o){
   const z = o.z;
   const xA = L.road[0][0] + r*0.25, xB = L.road[1][0] - r*0.25;
   const b = makeBall(r, PAL.candyOrange, {rough:0.28, emissive:0x442200, ei:0.4, candy:true});
-  b.position.set(o.x, r*0.97, z);
+  // rollers have no x in the level data (they sweep the whole road); start
+  // them at mid-road so the first frame is not a NaN matrix
+  b.position.set(o.x !== undefined ? o.x : (L.road[0][0] + L.road[1][0]) / 2, r*0.97, z);
   b.castShadow = true;
   g.add(b);
   const stripe = new THREE.Mesh(_GEO.torus, mat(PAL.candyWhite));
@@ -339,8 +352,10 @@ function buildRotator(g, L, o){
         const px = o.x + Math.cos(a)*rr;
         const pz = o.z - Math.sin(a)*rr;
         const half = r*0.27;
+        // collider top = top of the drawn arm (tip ball is the highest part),
+        // so a jump that visually clears the arm is never hit by "air"
         cols[idx].min.set(px-half, 0, pz-half);
-        cols[idx].max.set(px+half, 1.15, pz+half);
+        cols[idx].max.set(px+half, hubY + 0.24 + 0.02, pz+half);
         idx++;
       }
     }
@@ -506,12 +521,14 @@ function buildGap(g, L, o){
   // motion ("jump here") from far away at zero extra draw calls per arrow.
   if(typeof document !== 'undefined'){
     // the lane must end before the first launch pad on the approach (a boost
-    // or bounce pad), otherwise arrows run underneath it and get hidden
+    // or bounce pad), otherwise arrows run underneath it and get hidden.
+    // Scans the level data, not RT.boards: pads listed AFTER the gap in the
+    // obstacle list are not built yet at this point but still matter.
     let laneEnd = z0 - 0.4;
-    for(const b of RT.boards){
-      if(!((b.boost || b.bounce) && !b.disabled)) continue;
-      if(Math.abs(b.x - cx) >= (b.hx||1) - 0.3) continue;
-      if(b.z + (b.hz||1) < z0 && b.z > z0 - 12) laneEnd = Math.min(laneEnd, b.z - (b.hz||1) - 0.4);
+    for(const b of L.obstacles){
+      if(b.k !== 'boost' && b.k !== 'bounce') continue;
+      if(Math.abs((b.x||0) - cx) >= padHx(b) - 0.3) continue;
+      if(b.z + padHz(b) < z0 && b.z > z0 - 12) laneEnd = Math.min(laneEnd, b.z - padHz(b) - 0.4);
     }
     const laneLen = Math.min(7, laneEnd - 1);
     if(laneLen > 2.5){
@@ -528,14 +545,14 @@ function buildGap(g, L, o){
         RT._chevTex = new THREE.CanvasTexture(cc);
         RT._chevTex.wrapS = RT._chevTex.wrapT = THREE.RepeatWrapping;
       }
-      const lane = new THREE.Mesh(_GEO.plane, new THREE.MeshBasicMaterial({
+      const lane = new THREE.Mesh(_GEO.plane, own(new THREE.MeshBasicMaterial({
         map: RT._chevTex, transparent:true, opacity:0.9, depthWrite:false, toneMapped:false
-      }));
+      })));
       lane.rotation.set(-Math.PI/2, 0, Math.PI);   // chevrons point +z, toward the gap
       lane.scale.set(w - 0.8, laneLen, 1);   // spans the road (w = gap width incl. shoulders)
       lane.position.set(cx, 0.03, laneEnd - laneLen/2);
       // texture v runs along the strip; repeat so ~2m per chevron
-      lane.material.map = RT._chevTex.clone();
+      lane.material.map = own(RT._chevTex.clone());
       lane.material.map.needsUpdate = true;
       lane.material.map.repeat.set(Math.max(1, Math.round(lane.scale.x/2.4)), Math.max(1, Math.round(laneLen/2)));
       lane.material.map.wrapS = lane.material.map.wrapT = THREE.RepeatWrapping;
@@ -551,7 +568,7 @@ function buildGap(g, L, o){
   const wcol = L.theme === 'honey' ? 0xffb347 : L.theme === 'canyon' ? 0x53e08c : 0x3fb4ff;
   const glow = new THREE.Mesh(
     _GEO.plane,
-    new THREE.MeshBasicMaterial({color:wcol, transparent:true, opacity:0.6, depthWrite:false})
+    own(new THREE.MeshBasicMaterial({color:wcol, transparent:true, opacity:0.6, depthWrite:false}))
   );
   glow.rotation.x = -Math.PI/2;
   glow.scale.set(w, z1-z0, 1);
@@ -635,6 +652,8 @@ function buildDisc(g, L, o){
 }
 
 // --- falling-tile bridge (Tip-Toe style): tiles drop after being stepped on ---
+// Timings are casual-friendly: 0.7s of shaking before a tile drops (enough
+// to step off it), and it is back 2.2s after it has fallen.
 function buildTiles(g, L, o){
   const rows = o.rows||4, cols = o.cols||3, cw = o.cw||2.6, cd = o.cd||3.4;
   const z = o.z;
@@ -647,11 +666,14 @@ function buildTiles(g, L, o){
       const m = makeBox(cw*0.94, 0.26, cd*0.94,
         (ri+ci)%2 ? PAL.candyBlue : PAL.bubblegum,
         {rough:0.5, emissive:0x111144, ei:0.35});
+      // own material per tile: the armed/falling flash is per tile, and the
+      // cached material is shared by every other tile of the same colour
+      m.material = own(m.material.clone());
       m.position.set(tx, 0.13, tz);
       m.castShadow = true;
       g.add(m);
       const board = {x:tx, z:tz, hx:cw*0.47, hz:cd*0.47, y:0.26, type:'tile',
-        state:'idle', timer:0, mesh:m, _stood:false, fallV:0, fallT:0, respawnT:0};
+        state:'idle', timer:0, mesh:m, material:m.material, _stood:false, fallV:0, fallT:0, respawnT:0};
       RT.boards.push(board);
       tiles.push(board);
     }
@@ -660,8 +682,10 @@ function buildTiles(g, L, o){
     dt = dt || 0.016;
     for(const tl of tiles){
       if(tl.state === 'idle'){
-        if(tl._stood){
-          tl.state = 'armed'; tl.timer = 0.5;
+        // _stood is set by the physics step for every racer whose feet are on
+        // this tile (main.js stepBody) — nothing else arms a tile
+        if(tl._stood && !tl.disabled){
+          tl.state = 'armed'; tl.timer = 0.7;
           setEmissive(tl.material, 0x881111);
         }
         tl._stood = false;
@@ -670,7 +694,7 @@ function buildTiles(g, L, o){
         tl.mesh.position.x = tl.x + Math.sin(tl.timer*55)*0.05;
         if(tl.timer <= 0){
           tl.state = 'falling'; tl.fallT = 0; tl.fallV = 0;
-          tl.disabled = true;
+          tl.disabled = true;          // no longer standable
         }
       } else if(tl.state === 'falling'){
         tl.fallT += dt;
@@ -678,13 +702,14 @@ function buildTiles(g, L, o){
         tl.mesh.position.y -= tl.fallV*dt;
         tl.mesh.rotation.x += dt*1.6;
         if(tl.fallT > 1.4){
-          tl.state = 'gone'; tl.respawnT = 3.2;
+          tl.state = 'gone'; tl.respawnT = 2.2;
           tl.mesh.visible = false;
         }
       } else if(tl.state === 'gone'){
         tl.respawnT -= dt;
         if(tl.respawnT <= 0){
           tl.state = 'idle'; tl.disabled = false;
+          tl._stood = false;            // feet that armed it last time are long gone
           tl.mesh.visible = true;
           tl.mesh.position.set(tl.x, 0.13, tl.z);
           tl.mesh.rotation.x = 0;
@@ -713,10 +738,10 @@ function buildFan(g, L, o){
     rotor.add(holder);
   }
   // translucent lift column
-  const colGeo = new THREE.CylinderGeometry(r, r*0.85, 7.5, 18, 1, true);
-  const col = new THREE.Mesh(colGeo, new THREE.MeshBasicMaterial({
+  const colGeo = own(new THREE.CylinderGeometry(r, r*0.85, 7.5, 18, 1, true));
+  const col = new THREE.Mesh(colGeo, own(new THREE.MeshBasicMaterial({
     color:0x9fe8ff, transparent:true, opacity:0.13, side:THREE.DoubleSide, depthWrite:false
-  }));
+  })));
   col.position.set(o.x, 0.6, o.z);
   g.add(col);
   const ringT = new THREE.Mesh(_GEO.torus, mat(PAL.candyWhite, {emissive:0x668899, ei:0.5}));
@@ -1021,6 +1046,9 @@ function voidBands(L){
   return merged;
 }
 
+// footprint of a launch pad from its level data (boost: w×d, bounce: radius r)
+function padHx(b){ return b.k === 'bounce' ? (b.r||1.2) : (b.w||6)/2; }
+function padHz(b){ return b.k === 'bounce' ? (b.r||1.2) : (b.d||2)/2; }
 // z-range of the chevron approach lane in front of each gap (same rule as
 // buildGap: stops before the first launch pad within 12m of the edge)
 function approachLanes(L){
@@ -1031,7 +1059,7 @@ function approachLanes(L){
     let laneEnd = z0 - 0.4;
     for(const b of L.obstacles){
       if(b.k !== 'boost' && b.k !== 'bounce') continue;
-      if(b.z + (b.d||b.r||1)/2 < z0 && b.z > z0 - 12) laneEnd = Math.min(laneEnd, b.z - (b.d||b.r||1)/2 - 0.4);
+      if(b.z + padHz(b) < z0 && b.z > z0 - 12) laneEnd = Math.min(laneEnd, b.z - padHz(b) - 0.4);
     }
     const laneLen = Math.min(7, laneEnd - 1);
     if(laneLen > 2.5) out.push([laneEnd - laneLen, laneEnd]);
@@ -1237,5 +1265,5 @@ function fanAt(px, pz){
 }
 
 window.ThemeAPI = {buildLevel, updateObstacles, groundAt, effectiveSurfaceY,
-  roadXAt, voidAt, glueAt, beltAt, fanAt, PAL, RT, STEP_UP};
+  roadXAt, voidAt, glueAt, beltAt, fanAt, disposeLevel, PAL, RT, STEP_UP};
 })();

@@ -1,0 +1,52 @@
+name: Publish the game to GitHub Pages
+
+# Every push to `main` publishes the game (and only the game: no decks, no
+# render previews, no tests) to https://chengkaho98-svg.github.io/Mini3Dgame/
+# One-time setup in the repository: Settings -> Pages -> Source "GitHub Actions"
+# (the `enablement` step below tries to switch it on by itself).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the tests (track geometry, level data, DOM contract)
+        run: npm run test:node
+
+      - name: Assemble the game folder
+        run: |
+          mkdir dist
+          cp index.html levels.js build.js bots.js analytics.js commentator.js main.js cover.jpg dist/
+          cp -r vendor dist/
+          mkdir -p dist/assets/audio
+          cp assets/audio/*.mp3 dist/assets/audio/ 2>/dev/null || true
+          echo "--- published files:" && find dist -type f | sort
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

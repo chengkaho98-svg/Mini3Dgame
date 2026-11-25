@@ -199,11 +199,13 @@ A.briefing = function(racers){
   const st = A.standings(racers);
   const L = window.LEVELS[window._S ? window._S.levelIdx : 0];
   // most relevant events for a commentator: the newest high-priority ones first
+  // with one player the commentator may say "you"; with several, names only
+  const solo = racers.filter(r => r.kind === 'human').length === 1;
   const recent = A.events.slice()
     .sort((a, b) => (b.prio - a.prio) || (b.t - a.t)).slice(0, 6)
     .sort((a, b) => a.t - b.t)
     .map(e => {
-    const who = e.human ? e.name + '(你)' : e.name;
+    const who = e.human ? e.name + (solo ? '(你)' : '（玩家）') : e.name;
     if(e.kind === 'fall') return who + ' 跌落水' + (e.extra ? ' ' + e.extra + '次' : '');
     if(e.kind === 'tumble') return who + ' 被撞跌';
     if(e.kind === 'finish') return who + ' 衝線 ' + e.extra;
@@ -213,6 +215,7 @@ A.briefing = function(racers){
   });
   return {
     level: L ? L.name : '',
+    solo,
     timeLeft: window._S ? Math.round(window._S.tLeft) : 0,
     racers: st.map((s, i) => ({
       name: s.name, human: s.human, pos: i + 1, win: Math.round(s.win),

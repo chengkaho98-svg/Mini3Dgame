@@ -3,4 +3,9 @@ desktop.ini
 .DS_Store
 node_modules/
 *.log
+
+# local scratch / generated output
 compare/
+dist/
+# slide previews rendered by render_ppt.ps1 (regenerate any time; ~22 MB)
+ppt-render*/

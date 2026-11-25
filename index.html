@@ -6,13 +6,16 @@
 <title>🍬 糖糖大亂鬥 SUGAR RUSH ROYALE</title>
 <meta property="og:title" content="🍬 糖糖大亂鬥 SUGAR RUSH ROYALE">
 <meta property="og:description" content="5 大糖果關卡 · 本地 4 位玩家＋AI 至 10 人混戰 · 致敬 Fall Guys">
-<meta property="og:image" content="cover.png">
+<meta property="og:image" content="cover.jpg">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍭</text></svg>">
-<!-- rounded web fonts (preconnect for a fast first paint). Latin first for the
-     bubbly candy look; Huninn covers Traditional Chinese; system CJK last. -->
+<!-- rounded web fonts. Latin first for the bubbly candy look; Huninn covers
+     Traditional Chinese; system CJK last. The stylesheet is loaded WITHOUT
+     blocking: if Google Fonts is unreachable or slow the game still starts
+     at once, in the fallback fonts. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Huninn&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Huninn&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Huninn&display=swap" rel="stylesheet"></noscript>
 <style>
   :root{
     --candy-bg:#2a1a4a; --panel:rgba(30,18,60,.82); --pink:#ff5c9d;
@@ -41,15 +44,15 @@
   .rdot{position:absolute;top:-4px;width:10px;height:10px;border-radius:50%;
     border:1.5px solid rgba(0,0,0,.4);transition:left .18s linear;pointer-events:none}
   .rdot.hu{width:15px;height:15px;top:-7px;border:2.5px solid #fff;box-shadow:0 0 8px rgba(255,255,255,.8);z-index:2}
-  #cpBox{position:fixed;top:21%;left:24px;max-width:280px;background:var(--panel);
-    border:2px solid var(--cyan);border-radius:16px;padding:12px 18px;font-size:13px;line-height:1.8}
-  #cpBox b{color:var(--yellow);font-size:14px}
-  #stBox{position:fixed;top:21%;right:24px;min-width:150px;background:var(--panel);
-    border:2px solid var(--purple);border-radius:16px;padding:12px 18px;font-size:13px;line-height:1.8}
+  /* single-player panels: top-right stats, standings list under it. With 2+
+     players they are swapped for one overlay per screen column (#colHud). */
+  #stBox{position:fixed;top:12px;right:16px;min-width:150px;background:var(--panel);
+    border:2px solid var(--purple);border-radius:16px;padding:10px 16px;font-size:13px;line-height:1.8}
   #stBox b{font-size:18px;color:var(--yellow)}
   #rankBox{position:fixed;top:36%;right:24px;width:214px;background:var(--panel);
     border:2px solid var(--cyan);border-radius:16px;padding:10px 14px;font-size:12.5px;line-height:1.5}
   #rankBox .rt{font-weight:900;color:var(--yellow);font-size:13px;margin-bottom:4px;letter-spacing:1px}
+  .solo-only{display:none!important}
   .rrow{display:flex;align-items:center;gap:6px;padding:2px 0}
   .rrow .rp{width:20px;font-weight:900;color:#cbb8f5;flex:none;text-align:right}
   .rrow .rp.me{color:var(--pink)}
@@ -69,24 +72,53 @@
     max-width:92vw;overflow:hidden;text-overflow:ellipsis}
   .kbd{background:#45306e;border:1px solid #6b4fa0;border-radius:4px;padding:1px 6px;
     font-family:Consolas,monospace;font-weight:700;font-size:.86em}
-  #rot{position:fixed;bottom:104px;right:20px;font-size:12px;padding:4px 10px;border-radius:10px;
-    background:rgba(20,12,44,.55);color:#9a86c8}
+  /* mouse hint: bottom-left corner, clear of both the key rows (bottom-right)
+     and the standings panel above them */
+  #rot{position:fixed;bottom:24px;left:20px;font-size:12px;padding:4px 10px;border-radius:10px;
+    background:rgba(20,12,44,.55);color:#b7a6e0}
   .keyrow{position:fixed;bottom:18px;right:20px;display:flex;flex-direction:column;gap:5px;align-items:center}
   .rowk{display:flex;gap:6px}
   .wk{width:40px;height:40px;border-radius:9px;border:2px solid #6b4fa0;background:rgba(40,24,74,.85);
     color:#d8c9ff;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;
     box-shadow:0 3px 0 #35205c;position:relative}
   .wk.on{background:var(--pink);border-color:#fff;color:#fff;transform:translateY(3px);box-shadow:none}
-  .wk.sp{width:96px}.wk.sh{font-size:11px}
+  .wk.sp{width:96px}.wk.sh{width:84px;font-size:11px}
   .wk .tag{position:absolute;top:-17px;left:50%;transform:translateX(-50%);font-size:10px;
     color:#8d76c2;white-space:nowrap;font-weight:700}
+  /* split-screen: each player's column gets its own name tag, standing, hint
+     and key widget, so nobody has to look at a panel covering someone else's view */
+  #colHud{position:fixed;inset:0;pointer-events:none;z-index:9}
+  .colhud{position:absolute;top:0;bottom:0;overflow:hidden}
+  .cprog{position:absolute;top:0;left:0;right:0;height:5px;background:rgba(255,255,255,.14)}
+  .cprog i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--pink));transition:width .16s}
+  .ctag{position:absolute;top:62px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:7px;
+    padding:3px 13px;border-radius:999px;background:rgba(20,12,44,.8);border:2px solid #fff;
+    font-weight:900;font-size:14px;white-space:nowrap}
+  .ctag i{width:11px;height:11px;border-radius:50%}
+  .ctag span{font-weight:700;font-size:11px;color:#cbb8f5}
+  .cstat{position:absolute;top:103px;left:50%;transform:translateX(-50%);font-size:12px;font-weight:800;white-space:nowrap;
+    padding:3px 12px;border-radius:999px;background:rgba(20,12,44,.72);color:#e9f9ff}
+  .chint{position:absolute;bottom:88px;left:5%;right:5%;text-align:center;font-size:12.5px;font-weight:700;line-height:1.35;
+    padding:5px 8px;border-radius:12px;background:rgba(20,12,44,.74);border:1.5px solid var(--yellow)}
+  .chint:empty{display:none}
+  .ckeys{position:absolute;bottom:10px;left:0;right:0;display:flex;flex-direction:column;gap:4px;align-items:center}
+  .ckeys .rowk{gap:4px}
+  .ckeys .wk{width:auto;min-width:30px;height:30px;padding:0 6px;font-size:11px;white-space:nowrap;
+    box-shadow:0 2px 0 #35205c}
+  .ckeys .wk.sh{font-size:10px}
+  .ckeys .wk .tag{display:none}
+  .cdiv{position:absolute;top:0;bottom:0;left:-2px;width:3px;background:rgba(255,255,255,.4)}
+  body.split .progt{display:none}       /* each column has its own progress bar */
+  .pauseList{max-height:46vh;overflow-y:auto;min-width:280px;margin-top:8px;text-align:left;font-size:15px}
+  .pauseList .rrow{padding:3px 6px;border-radius:8px}
   .btn{pointer-events:auto;cursor:pointer;background:linear-gradient(180deg,#ff7cb9,#ff4d8f);
     border:3px solid #fff;color:#fff;font-weight:900;border-radius:999px;padding:11px 36px;font-size:18px;
     letter-spacing:1px;box-shadow:0 5px 0 #b22a5f,0 8px 24px rgba(255,77,143,.4);transition:transform .1s}
   .btn:active{transform:translateY(4px);box-shadow:0 1px 0 #b22a5f}
   .btn.sec{background:linear-gradient(180deg,#7a5cff,#5330d8);box-shadow:0 5px 0 #311d99,0 8px 24px rgba(83,48,216,.4)}
   .btn.sm{padding:7px 18px;font-size:14px}
-  #restart{position:fixed;top:12px;right:16px;padding:8px 22px;font-size:15px;pointer-events:auto}
+  /* beside the clock, so it never sits on top of the right-most player's view */
+  #restart{position:fixed;top:14px;left:calc(50% + 80px);padding:6px 16px;font-size:14px;pointer-events:auto}
   .ov{position:fixed;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;
     flex-direction:column;text-align:center;gap:14px;padding:24px}
   /* overlay entrances: the menu lifts in, pause/results pop their content */
@@ -123,7 +155,7 @@
   .resList .rrow{animation:riseIn .38s ease-out backwards}
   #menu-ov{overflow-y:auto;background:
     linear-gradient(180deg, rgba(20,10,48,.62) 0%, rgba(42,22,85,.58) 48%, rgba(20,10,48,.82) 100%),
-    url('cover.png') center 30%/cover no-repeat;
+    url('cover.jpg') center 30%/cover no-repeat;
     background-color:#140a30}
   #menu-ov h1{font-size:min(58px,9vw);font-weight:900;letter-spacing:3px;
     filter:drop-shadow(0 5px 0 rgba(0,0,0,.35))}
@@ -149,32 +181,50 @@
   .lvl .stars{font-size:11px;letter-spacing:2px;color:var(--yellow)}
   .lvl .diff{font-size:11px;color:#b9a3ec}
   /* lobby */
-  .lobby{background:var(--panel);border:2px solid var(--cyan);border-radius:18px;padding:14px 20px;max-width:640px}
+  .lobby{background:var(--panel);border:2px solid var(--cyan);border-radius:18px;padding:14px 20px;max-width:780px}
   .lobby .lt{font-weight:900;color:var(--cyan);letter-spacing:2px;font-size:15px;margin-bottom:8px}
-  .slot{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.06);margin:4px 0}
+  /* player slots sit side by side and wrap, so four joined players add one
+     row instead of three (the menu has to keep fitting a 720px-high window) */
+  #lobbySlots{display:flex;flex-wrap:wrap;gap:4px 8px}
+  .slot{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:10px;background:rgba(255,255,255,.06);flex:1 1 352px;min-width:0}
   .slot .sdot{width:26px;height:26px;border-radius:50%;border:2.5px solid #fff;cursor:pointer;flex:none;
     box-shadow:inset 0 -5px 8px rgba(0,0,0,.3)}
   .slot .snm{font-weight:900;font-size:16px;min-width:44px;text-align:left}
-  .slot .sin{color:#b9a3ec;font-size:13px;flex:1;text-align:left}
+  .slot .sin{color:#b9a3ec;font-size:13px;flex:1;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .slot .srm{cursor:pointer;color:#ff8a8a;font-weight:900;padding:2px 8px;border-radius:8px;background:rgba(255,80,80,.15)}
   .slot .srm:hover{background:rgba(255,80,80,.35)}
-  .slotinfo{margin-top:8px;font-size:13px;color:#cbb8f5}
+  .slotinfo{flex-basis:100%;margin-top:4px;font-size:13px;color:#cbb8f5}
   .slotinfo b{color:var(--yellow)}
   .lobby .lrow{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap;justify-content:center}
   .chk{display:flex;align-items:center;gap:6px;font-size:14px;color:#e8dfff;cursor:pointer}
   .chk input{width:17px;height:17px;accent-color:var(--pink);cursor:pointer}
+  .airow{display:inline-flex;align-items:center;gap:6px}
+  [hidden]{display:none!important}
   select{background:#2b1b52;color:#fff;border:2px solid #6b4fa0;border-radius:8px;padding:4px 8px;font-weight:700;cursor:pointer}
-  #menu-ov .stats{font-size:14px;color:#cbb8f5;line-height:1.9;max-width:760px}
+  #menu-ov .stats{font-size:14px;color:#e4daff;line-height:1.9;max-width:900px;
+    background:rgba(20,12,44,.66);border-radius:14px;padding:5px 18px}   /* readable over the cover art */
   #pause-ov,#res-ov{background:rgba(12,6,28,.85);backdrop-filter:blur(7px)}
   .ov h2{font-weight:900}
   #resTitle{font-size:50px}
   #resTitle.win{color:var(--yellow);text-shadow:0 0 30px rgba(255,210,62,.5)}
   #resTitle.lose{color:var(--warn)}
   .stars{font-size:20px;font-weight:900;margin-bottom:6px}
-  .resList{display:flex;flex-direction:column;gap:2px;max-height:44vh;overflow-y:auto;min-width:300px}
+  .resList{display:flex;flex-direction:column;gap:2px;max-height:30vh;overflow-y:auto;min-width:300px}
   .resList .rrow{font-size:15px;padding:3px 6px;border-radius:8px}
   .resList .rrow.me{background:rgba(255,92,157,.15)}
+  .resList .rrow.fin .nm{opacity:1}       /* (the in-race panel dims finished names; here they are the result) */
   .ov .row{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+  /* results: the podium, then one card per human player, then everyone */
+  .podium{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+  .pod{min-width:124px;padding:5px 14px;border-radius:14px;background:rgba(255,255,255,.1);border:2px solid;font-weight:800;font-size:16px}
+  .pod span{display:block;font-size:12px;color:#cbb8f5;font-weight:700}
+  .resCards{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .resCard{min-width:176px;text-align:left;background:var(--panel);border:2px solid #fff;border-radius:16px;padding:8px 14px;font-size:13.5px;line-height:1.7}
+  .resCard .cn{font-weight:900;font-size:14px}
+  .resCard .ct{font-size:24px;font-weight:900;color:var(--yellow);line-height:1.2}
+  .resCard .cs{color:var(--yellow);font-size:13px;letter-spacing:1px}
+  .mut{opacity:.72;font-weight:700}
+  .new{color:var(--good);font-weight:900}
   #count-ov{position:fixed;inset:0;z-index:28;display:flex;align-items:center;justify-content:center;
     pointer-events:none;background:rgba(10,5,24,.18)}
   #countNum{font-size:150px;font-weight:900;color:var(--yellow);
@@ -203,8 +253,24 @@
   @keyframes tpop{0%{transform:scale(.5)}55%{transform:scale(1.14)}100%{transform:scale(1)}}
   .conf{position:fixed;width:11px;height:16px;top:-3vh;z-index:60;pointer-events:none;border-radius:2px}
   @keyframes cf{to{transform:translateY(108vh) rotate(720deg)!important;opacity:.85}}
-  @media(max-width:760px){#cpBox,#stBox,#rankBox{display:none}.btn{padding:9px 26px;font-size:16px}
+  @media(max-width:760px){#stBox,#rankBox{display:none}.btn{padding:9px 26px;font-size:16px}
     .lvl{width:104px}.clock{font-size:21px;padding:6px 18px}#countNum{font-size:110px}}
+  /* short viewports (a 1280x720 window): the whole menu must fit without scrolling */
+  @media (max-height: 800px){
+    .ov{gap:7px;padding:10px 20px}
+    #menu-ov h1{font-size:min(40px,6.5vw)}
+    #menu-ov p.sub{font-size:13px;margin-top:-2px}
+    .lvl{width:116px;padding:4px 6px;gap:1px}
+    .lvl .n{font-size:18px}.lvl .t{font-size:12px}.lvl .stars{font-size:10px;letter-spacing:1px}
+    .lobby{padding:8px 16px}
+    .lobby .lt{font-size:13px;margin-bottom:5px}
+    .slot{padding:3px 8px}
+    .slot .sdot{width:22px;height:22px}.slot .snm{font-size:14px}.slot .sin{font-size:12px}
+    .slotinfo{font-size:12px;margin-top:2px}
+    .lobby .lrow{margin-top:5px;gap:8px}
+    .btn{padding:8px 24px;font-size:16px}
+    #menu-ov .stats{font-size:12.5px;line-height:1.5;padding:4px 16px}
+  }
 </style>
 </head>
 <body>
@@ -216,23 +282,19 @@
     <div class="lbl"><span id="lvname">LEVEL 1</span><span id="lvtime">--:--</span></div>
     <div class="prog"><i id="progbar"></i><div id="racestrip"></div></div>
   </div>
-  <div id="cpBox"></div>
   <div id="stBox"></div>
   <div id="rankBox"><div class="rt">🏁 即時排名</div><div id="rankList"></div></div>
   <div id="hint"></div>
   <div id="toastBox"></div>
   <div id="rot">滑鼠拖曳=轉視角 · 滾輪=縮放</div>
-  <div class="keyrow">
-    <div class="rowk"><div class="wk" data-key="ShiftLeft">SHIFT<div class="tag">撲倒/起身</div></div>
-      <div class="wk sp" data-key="Space">JUMP</div></div>
-    <div class="rowk"><div class="wk" data-key="KeyW">W</div><div class="wk" data-key="KeyA">A</div>
-      <div class="wk" data-key="KeyS">S</div><div class="wk" data-key="KeyD">D</div></div>
-  </div>
+  <!-- filled in by main.js: the keys of whoever owns the whole screen -->
+  <div class="keyrow"></div>
   <button id="restart" class="btn">↻ 重來</button>
 </div>
 
 <div id="count-ov" class="hidden"><div id="countNum">3</div></div>
-<div id="splitlines"></div>
+<!-- split-screen: one overlay column per player (name tag, standing, hint, keys) -->
+<div id="colHud"></div>
 
 <div id="menu-ov" class="ov">
   <h1><span class="c">🍬</span> <span class="c">糖</span> <span class="c">糖</span> <span class="c">大</span> <span class="c">亂</span> <span class="c">鬥</span></h1>
@@ -257,18 +319,20 @@
       </label>
     </div>
     <div class="lrow">
-      <label class="chk"><input type="checkbox" id="aiComm">🎙 AI 評述（本地 LLM）</label>
-      <span id="aiStatus" style="font-size:12px;color:#9a86c8">偵測中…</span>
-    </div>
-    <div class="lrow" style="color:#9a86c8;font-size:12.5px">
-      ⌨ P1：WASD＋Space＋左Shift &nbsp;|&nbsp; P2：↑↓←→＋右Ctrl／Enter＋右Shift<br>
-      ⌨ P3：IJKL＋U 跳＋O 撲 &nbsp;|&nbsp; P4：TFGH＋Y 跳＋R 撲（撳移動鍵即加入）
+      <label class="chk">🎵 音樂
+        <select id="musicSel"><option value="on">開</option><option value="off">關</option></select>
+      </label>
+      <label class="chk">🔊 音效
+        <select id="sfxSel"><option value="on">開</option><option value="off">關</option></select>
+      </label>
+      <span id="aiRow" class="airow"><label class="chk"><input type="checkbox" id="aiComm">🎙 AI 評述</label>
+        <span id="aiStatus" style="font-size:12px;color:#9a86c8">偵測中…</span></span>
     </div>
   </div>
   <div class="row"><button id="btnPlay" class="btn">▶ 開始比賽</button>
-    <button id="btnReset" class="btn sec">🗑 清除紀錄</button>
-    <button id="btnSound" class="btn sec">🔊 音效：開</button></div>
-  <div class="stats">P1 滑鼠拖曳轉視角（其他人視角固定向前）· 每人畫面左右並排 · Esc 暫停</div>
+    <button id="btnReset" class="btn sec">🗑 清除紀錄</button></div>
+  <div class="stats">⌨ P1：WASD＋Space＋左Shift · P2：↑↓←→＋右Ctrl／Enter＋右Shift · P3：IJKL＋U／O · P4：TFGH＋Y／R（撳移動鍵即加入）<br>
+    P1 滑鼠拖曳轉視角（其他人視角固定向前）· 每人畫面左右並排 · Esc 暫停</div>
 </div>
 
 <div id="pause-ov" class="ov hidden"><h2 style="font-size:44px;color:var(--cyan)">⏸ 暫停</h2>
@@ -286,10 +350,34 @@
   </div>
 </div>
 
-<script type="importmap">
-{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+<!-- Shown instead of a dead menu if the game cannot start (engine failed to
+     load, or the browser has no WebGL). main.js clears the timer when booted. -->
+<div id="boot-error" class="ov hidden">
+  <h2 style="font-size:36px;color:var(--warn)">😵 無法啟動遊戲</h2>
+  <div class="stats" id="bootErrorMsg"></div>
+  <div class="row"><button class="btn" onclick="location.reload()">↻ 重新載入</button></div>
+</div>
+<script>
+  (function(){
+    var shown = false;
+    window.__srrBootFail = function(msg){
+      if(shown || window.__srrBooted) return;
+      shown = true;
+      document.getElementById('bootErrorMsg').textContent = msg;
+      document.getElementById('boot-error').classList.remove('hidden');
+    };
+    setTimeout(function(){
+      window.__srrBootFail('遊戲引擎未能載入。請檢查網絡連線，然後重新載入頁面。');
+    }, 15000);
+  })();
 </script>
-<script type="module">
+
+<!-- three.js ships with the game (vendor/three, see tools/vendor-three.js):
+     no CDN at runtime, so the game starts wherever it is hosted. -->
+<script type="importmap">
+{"imports":{"three":"./vendor/three/build/three.module.min.js","three/addons/":"./vendor/three/examples/jsm/"}}
+</script>
+<script type="module" onerror="__srrBootFail('3D 引擎（three.js）載入失敗。請重新載入頁面。')">
   // Load THREE as ES module, publish on window for the classic scripts,
   // then hand control to the game (main.js listens for this event).
   import * as THREE from 'three';
@@ -301,6 +389,15 @@
 <script src="bots.js"></script>
 <script src="analytics.js"></script>
 <script src="commentator.js"></script>
-<script type="module" src="main.js"></script>
+<script type="module" src="main.js" onerror="__srrBootFail('main.js 載入失敗。請重新載入頁面。')"></script>
+<script>
+  // Regression suites live in tests/suites.js and only load for index.html?test=1 (`npm test`).
+  // Add &manual=1 to load them without starting, for poking at the game from the console.
+  if(/[?&]test=1(&|$)/.test(location.search)){
+    var srrSuites = document.createElement('script');
+    srrSuites.src = 'tests/suites.js';
+    document.body.appendChild(srrSuites);
+  }
+</script>
 </body>
 </html>

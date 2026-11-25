@@ -1,7 +1,7 @@
 // ================= SUGAR RUSH ROYALE — main.js =================
 // Game core: renderer + bloom, fixed-step capsule physics (anti-tunnel),
-// up-to-10 local racers (keyboard x2 + gamepads + AI bots), countdown,
-// shared/solo camera, particles, HUD, lobby & race flow.
+// up-to-10 local racers (up to 4 on one keyboard + AI bots), countdown,
+// one camera per player, particles, HUD, lobby & race flow.
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -24,8 +24,13 @@ const GRAV = 34, JUMP_V = 11.2, MAX_SPD = 6.2, MOVE_ACC = 46, DIVE_V = 12.5;
 const FIXED = 1/120;
 const MAX_RACERS = 10;
 const BOOST_AIR_HEIGHT = 1.9;   // how high above a boost pad still triggers it
+// COINS = SUGAR RUSH: every coin makes you a little faster for the rest of the
+// race, and falling spills a few. Only human players collect them (the bots
+// leave the coins on the track for you).
+const COIN_BOOST = 0.015, COIN_MAX = 10, COINS_LOST_ON_FALL = 3;
+const coinBonus = n => COIN_BOOST * Math.min(COIN_MAX, n);
 const BOOST_AIR_LIFT = 7.5;     // min upward speed kept when boosted mid-air
-const MAX_HUMANS = 4;   // local human players: keyboard x2 + gamepads
+const MAX_HUMANS = 4;   // local human players: four keyboard layouts on one keyboard
 // shared with bots.js (ballistic maths must match the player exactly)
 window.SRR_CONST = { GRAV, JUMP_V, MAX_SPD, MOVE_ACC, DIVE_V,
   AIRTIME: 2*JUMP_V/GRAV };   // full-jump airtime ≈ 0.659s
@@ -54,60 +59,200 @@ const store = {
 };
 
 // ================= audio =================
+// Every sound effect is synthesised with WebAudio (no sample files). Music is
+// optional and file-driven: drop these into assets/audio/ and they are picked
+// up automatically, no code change —
+//   bgm_menu.mp3, bgm_race.mp3      (seamless loops)
+//   jingle_win.mp3, jingle_lose.mp3
+// While a file is missing the game simply does without it (the jingles fall
+// back to synthesised ones).
+const AUDIO_DIR = 'assets/audio/';
+const MUSIC_FILES = { menu: 'bgm_menu.mp3', race: 'bgm_race.mp3' };
+const MUSIC_LEVEL = 0.55, SFX_LEVEL = 0.9;
+function loadAudioPrefs(){
+  try{
+    const p = JSON.parse(localStorage.getItem('srr-audio') || '{}');
+    return { music: typeof p.music === 'number' ? p.music : MUSIC_LEVEL, sfx: typeof p.sfx === 'number' ? p.sfx : SFX_LEVEL };
+  }catch(e){ return { music: MUSIC_LEVEL, sfx: SFX_LEVEL }; }
+}
 const AU = {
-  ctx:null, on:true,
-  ensure(){ if(!this.ctx){ try{ this.ctx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } },
-  beep(freq, dur=0.1, type='sine', vol=0.16, slide=0){
-    if(!this.on) return; this.ensure(); if(!this.ctx) return;
-    const t = this.ctx.currentTime;
-    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
-    o.type = type; o.frequency.setValueAtTime(freq, t);
-    if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(40,freq+slide), t+dur);
-    g.gain.setValueAtTime(vol, t);
-    g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
-    o.connect(g); g.connect(this.ctx.destination);
-    o.start(t); o.stop(t+dur+0.02);
+  ctx:null, sfxBus:null, noiseBuf:null, muted:false,   // muted while tests fast-forward
+  vol: loadAudioPrefs(),        // 0..1 each; 0 = off
+  tracks: {},                   // file name -> HTMLAudioElement
+  avail: {},                    // file name -> true once it answered
+  current: null,                // music name playing now ('menu' | 'race')
+  wanted: null,                 // music the game wants once it may play
+  get on(){ return this.vol.sfx > 0; },
+  ensure(){
+    if(this.ctx || S.testMode) return this.ctx;
+    try{
+      const C = window.AudioContext || window.webkitAudioContext;
+      if(!C) return null;
+      this.ctx = new C();
+      this.sfxBus = this.ctx.createGain();
+      this.sfxBus.gain.value = this.vol.sfx;
+      this.sfxBus.connect(this.ctx.destination);
+      // one second of white noise, reused by every noisy effect
+      const n = this.ctx.sampleRate, buf = this.ctx.createBuffer(1, n, n), d = buf.getChannelData(0);
+      for(let i=0;i<n;i++) d[i] = Math.random()*2 - 1;
+      this.noiseBuf = buf;
+    }catch(e){}
+    return this.ctx;
   },
-  jump(){ this.beep(520,0.14,'sine',0.10,220); },
-  land(){ this.beep(180,0.08,'triangle',0.08); },
-  coin(){ this.beep(880,0.09,'square',0.07); this.beep(1320,0.12,'square',0.05); },
-  boing(){ this.beep(300,0.22,'sine',0.16,500); },
-  bump(){ this.beep(140,0.12,'sawtooth',0.12,-60); },
-  hit(){ this.beep(90,0.3,'sawtooth',0.2,-40); },
-  whoosh(){ this.beep(220,0.3,'sawtooth',0.1,660); },
-  cd(n){ this.beep(n===0?880:440, n===0?0.35:0.12, 'square', 0.14); },
-  win(){ [523,659,784,1047].forEach((f,i)=>setTimeout(()=>this.beep(f,0.18,'square',0.11),i*130)); },
-  lose(){ [400,300,220,150].forEach((f,i)=>setTimeout(()=>this.beep(f,0.2,'sawtooth',0.11),i*150)); },
-  fall(){ this.beep(600,0.5,'sine',0.12,-480); }
+  setVol(kind, v){
+    this.vol[kind] = v;
+    try{ localStorage.setItem('srr-audio', JSON.stringify(this.vol)); }catch(e){}
+    if(kind === 'sfx'){ if(this.sfxBus) this.sfxBus.gain.value = v; }
+    else if(v <= 0) this.stopMusic(); else if(this.wanted) this.startMusic(this.wanted);
+  },
+  // --- building blocks ---
+  tone(o){                      // oscillator with a pitch glide and a soft edge
+    const c = this.ensure(); if(!c || this.muted || this.vol.sfx <= 0) return;
+    const t0 = c.currentTime + (o.at||0), dur = o.dur||0.1, v = o.vol||0.15;
+    const osc = c.createOscillator(), g = c.createGain();
+    osc.type = o.type||'sine';
+    osc.frequency.setValueAtTime(o.freq, t0);
+    if(o.to) osc.frequency.exponentialRampToValueAtTime(Math.max(30, o.to), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(v, t0 + (o.attack||0.006));
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    let node = osc;
+    if(o.lp){ const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = o.lp; osc.connect(f); node = f; }
+    node.connect(g); g.connect(this.sfxBus);
+    osc.start(t0); osc.stop(t0 + dur + 0.03);
+  },
+  noise(o){                     // filtered noise burst with a frequency sweep
+    const c = this.ensure(); if(!c || this.muted || this.vol.sfx <= 0 || !this.noiseBuf) return;
+    const t0 = c.currentTime + (o.at||0), dur = o.dur||0.1;
+    const src = c.createBufferSource(); src.buffer = this.noiseBuf; src.loop = true;
+    const f = c.createBiquadFilter(); f.type = o.type||'bandpass'; f.Q.value = o.q||0.8;
+    f.frequency.setValueAtTime(o.from||800, t0);
+    if(o.to) f.frequency.exponentialRampToValueAtTime(Math.max(40, o.to), t0 + dur);
+    const g = c.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(o.vol||0.15, t0 + (o.attack||0.004));
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f); f.connect(g); g.connect(this.sfxBus);
+    src.start(t0); src.stop(t0 + dur + 0.03);
+  },
+  bell(freq, at, dur, vol){     // a note with its harmonics: coin / fanfare / tick
+    this.tone({freq, at, dur, vol, type:'sine'});
+    this.tone({freq:freq*2, at, dur:dur*0.7, vol:vol*0.3, type:'sine'});
+    this.tone({freq:freq*3.01, at, dur:dur*0.4, vol:vol*0.12, type:'sine'});
+  },
+  // --- game sounds ---
+  click(){ this.bell(1180, 0, 0.05, 0.08); },
+  jump(){ this.tone({freq:430, to:820, dur:0.16, vol:0.16}); this.noise({from:1800, to:3200, dur:0.05, vol:0.05, type:'highpass'}); },
+  dive(){ this.tone({freq:320, to:170, dur:0.17, vol:0.1, type:'sawtooth', lp:900}); this.noise({from:900, to:300, dur:0.14, vol:0.07}); },
+  land(){ this.tone({freq:165, to:88, dur:0.09, vol:0.13, type:'triangle'}); this.noise({from:700, to:250, dur:0.05, vol:0.07, type:'lowpass'}); },
+  coin(){ this.bell(988, 0, 0.1, 0.13); this.bell(1319, 0.07, 0.16, 0.13); },
+  boing(){ this.tone({freq:230, to:640, dur:0.09, vol:0.2}); this.tone({freq:640, to:260, dur:0.2, vol:0.16, at:0.09}); },
+  bump(){ this.noise({from:520, to:170, dur:0.13, vol:0.2, q:1.2}); this.tone({freq:115, to:58, dur:0.13, vol:0.2}); },
+  hit(){ this.noise({from:1100, to:160, dur:0.32, vol:0.3, type:'lowpass'}); this.tone({freq:85, to:38, dur:0.28, vol:0.3}); },
+  whoosh(){ this.noise({from:320, to:2600, dur:0.16, vol:0.18, q:1.5}); this.noise({from:2600, to:600, dur:0.22, vol:0.14, q:1.5, at:0.16}); },
+  fall(){ this.tone({freq:720, to:170, dur:0.5, vol:0.13, type:'triangle'}); this.noise({from:1400, to:260, dur:0.4, vol:0.24, type:'lowpass', at:0.46}); },
+  cd(n){ if(n === 0){ this.bell(880, 0, 0.34, 0.16); this.bell(1320, 0.02, 0.3, 0.1); } else this.bell(587, 0, 0.1, 0.14); },
+  finish(){ [784, 988, 1175].forEach((f,i)=>this.bell(f, i*0.07, 0.2, 0.14)); },
+  win(){ [523, 659, 784, 1047, 1319].forEach((f,i)=>this.bell(f, i*0.11, i === 4 ? 0.5 : 0.24, 0.16)); },
+  lose(){ [392, 330, 262, 196].forEach((f,i)=>this.tone({freq:f, to:f*0.94, dur:0.2, vol:0.13, type:'triangle', at:i*0.17, lp:1500})); },
+  // --- music (files) ---
+  async probe(){                // which music files exist? (asked once, at boot)
+    const files = Object.values(MUSIC_FILES).concat(['jingle_win.mp3', 'jingle_lose.mp3']);
+    for(const file of files){
+      try{ const r = await fetch(AUDIO_DIR + file, { method: 'HEAD' }); if(r.ok) this.avail[file] = true; }catch(e){}
+    }
+    if(this.wanted && !this.current) this.startMusic(this.wanted);
+  },
+  unlock(){                     // first user gesture: the browser allows sound now
+    const c = this.ensure();
+    if(c && c.state === 'suspended') c.resume().catch(()=>{});
+    if(this.wanted) this.startMusic(this.wanted);
+  },
+  fade(a, to, ms, done){
+    clearInterval(a._fade);
+    const from = a.volume, t0 = performance.now();
+    a._fade = setInterval(()=>{
+      const k = Math.min(1, (performance.now() - t0) / ms);
+      a.volume = Math.max(0, Math.min(1, from + (to - from) * k));
+      if(k >= 1){ clearInterval(a._fade); if(done) done(); }
+    }, 40);
+  },
+  startMusic(name){
+    this.wanted = name;
+    const file = MUSIC_FILES[name];
+    if(S.testMode || !file || !this.avail[file] || this.vol.music <= 0){ this.stopMusic(name === null); return; }
+    if(this.current === name) return;
+    this.stopMusic();
+    let a = this.tracks[file];
+    if(!a){ a = new Audio(AUDIO_DIR + file); a.loop = true; a.preload = 'auto'; this.tracks[file] = a; }
+    a.volume = 0;
+    a.play().then(()=>this.fade(a, this.vol.music, 800)).catch(()=>{});
+    this.current = name;
+  },
+  stopMusic(forget){
+    if(forget) this.wanted = null;
+    for(const k in this.tracks){
+      const a = this.tracks[k];
+      if(!a.paused) this.fade(a, 0, 450, ()=>a.pause());
+    }
+    this.current = null;
+  },
+  jingle(kind){                 // 'win' | 'lose' at the results screen
+    const file = 'jingle_' + kind + '.mp3';
+    if(!S.testMode && this.avail[file] && this.vol.music > 0){
+      this.stopMusic(true);
+      const a = new Audio(AUDIO_DIR + file);
+      a.volume = this.vol.music;
+      a.play().catch(()=>{});
+      return;
+    }
+    this[kind]();
+  }
 };
 
 // ================= DOM =================
 const $ = id => document.getElementById(id);
+// Every id here must exist in index.html — tests/dom-contract.test.js checks it
+// (a renamed element once silenced every toast message without any error).
 const UI = {};
-['hud','clock','progbar','racestrip','lvname','lvtime','cpBox','stBox','hint','qual','rankBox','rankList',
- 'menu-ov','pause-ov','res-ov','resTitle','resStats','pauseStats','toasts','lvlSel','swr','ccust',
- 'count-ov','countNum','lobbySlots','btnPlay','btnReset','btnSound','btnResume','btnQuit',
- 'btnNext','btnRetry','btnMenu','botCount','splitlines','joinKb2','fxSel'].forEach(id=>{ UI[id]=$(id); });
+['hud','clock','progbar','racestrip','lvname','lvtime','stBox','hint','rankBox','rankList',
+ 'menu-ov','pause-ov','res-ov','resTitle','resStats','pauseStats','toastBox','lvlSel','colHud',
+ 'count-ov','countNum','lobbySlots','btnPlay','btnReset','btnResume','btnQuit',
+ 'btnNext','btnRetry','btnMenu','botCount','joinKb2','fxSel'].forEach(id=>{ UI[id]=$(id); });
 UI.menu = UI['menu-ov']; UI.resOv = UI['res-ov']; UI.count = UI['count-ov'];
 UI.pause = UI['pause-ov']; UI.prog = UI.progbar; UI.clockEl = UI.clock;
+UI.keyrow = document.querySelector('#hud .keyrow');
+UI.rotHint = $('rot');
 
 function fmt(s){ s=Math.max(0,Math.ceil(s)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
 
-let toastTimers = [];
+// small floating messages ("被大球撞飛！", "+1 🍬"). At most three on screen.
 function toast(msg){
-  if(!UI.toasts) return;
+  const box = UI.toastBox;
+  if(!box) return;
   const d = document.createElement('div');
   d.className = 'toast bump'; d.textContent = msg;
-  UI.toasts.appendChild(d);
+  box.appendChild(d);
   setTimeout(()=>{ d.style.transition='opacity .4s'; d.style.opacity='0'; }, 1500);
   setTimeout(()=>{ d.remove(); }, 2000);
-  while(UI.toasts.children.length > 3) UI.toasts.firstChild.remove();
+  while(box.children.length > 3) box.firstChild.remove();
 }
 
 // ================= renderer / scene =================
 let FX_QUALITY = 'high';
 let SSAO_ON = true;        // contact-shadow pass in the bloom composer (solo view)
+// Creating the WebGL renderer is the one step that can legitimately fail on a
+// player's machine (no WebGL / blocked GPU). Say so on screen instead of
+// leaving a menu whose buttons do nothing.
 function initRenderer(){
+  try{ initRendererGL(); }
+  catch(e){
+    console.error('WebGL unavailable:', e);
+    S.renderer = null;
+    if(window.__srrBootFail) window.__srrBootFail('你嘅瀏覽器不支援 WebGL，無法顯示 3D 畫面。請改用最新版 Chrome、Edge、Firefox 或 Safari。');
+  }
+}
+function initRendererGL(){
   const canvas = $('c');
   S.renderer = new T.WebGLRenderer({canvas, antialias:true});
   S.renderer.setSize(innerWidth, innerHeight);
@@ -126,6 +271,7 @@ function initRenderer(){
   addEventListener('resize', onResize);
 }
 function onResize(){
+  if(!S.renderer) return;
   S.camera.aspect = innerWidth/innerHeight;
   S.camera.updateProjectionMatrix();
   S.renderer.setSize(innerWidth, innerHeight);
@@ -412,23 +558,28 @@ OUTLINE_MAT.__keep = true;   // shared across beans — never disposed with one
 const COLORS = ['#ff5c9d','#31e6ff','#ffd23e','#58e06c','#a25cff','#ff8a3d','#ff4d4d','#ffffff','#ffa3d1','#7fd0f7'];
 const lobby = {
   humans: [ {name:'P1', color:0, input:{kind:'kb', map:0}} ],   // map 0 = WASD
-  botFill: true,
   botCount: -1   // -1 = auto fill to 10; 0..9 = explicit bot count
 };
 function freeColors(){
   const used = new Set(lobby.humans.map(h=>h.color));
   return COLORS.map((c,i)=>i).filter(i=>!used.has(i));
 }
+// next colour for a player when they click their colour dot: cycles through
+// every colour nobody else is using (plus the one they already have)
+function nextFreeColor(h){
+  const used = new Set(lobby.humans.map(x=>x.color));
+  const pool = COLORS.map((c,i)=>i).filter(i => i === h.color || !used.has(i));
+  if(pool.length < 2) return h.color;
+  return pool[(pool.indexOf(h.color) + 1) % pool.length];
+}
 function joinHuman(input){
   if(lobby.humans.length >= MAX_HUMANS) return false;
   const free = freeColors();
   if(!free.length) return false;
-  let name;
-  if(input.kind==='kb') name = 'P'+(lobby.humans.length+1);
-  else name = '🎮'+(input.idx+1);
+  const name = 'P'+(lobby.humans.length+1);
   lobby.humans.push({name, color:free[0], input});
   refreshLobbyUI();
-  AU.ensure(); AU.beep(660,0.08);
+  AU.unlock(); AU.click();
   return true;
 }
 function removeHuman(i){
@@ -442,20 +593,17 @@ function refreshLobbyUI(){
   lobby.humans.forEach((h,i)=>{
     const d = document.createElement('div');
     d.className = 'slot';
-    const jk = KB_MAPS[h.input.map].jump[0].replace('Key','').replace('Control','Ctrl');
-    const dk = KB_MAPS[h.input.map].dive[0].replace('Key','').replace('ShiftLeft','左Shift').replace('ShiftRight','右Shift');
-    const inTxt = '⌨ '+KB_NAMES[h.input.map]+'（跳 '+jk+'·撲 '+dk+'）';
-    d.innerHTML = '<span class="sdot" style="background:'+COLORS[h.color]+'"></span>'+
+    const km = KB_MAPS[h.input.map];
+    const inTxt = '⌨ '+KB_NAMES[h.input.map]+' · 跳 '+keyLabel(km.jump[0])+' · 撲 '+keyLabel(km.dive[0]);
+    d.innerHTML = '<span class="sdot" style="background:'+COLORS[h.color]+'" title="撳一下換顏色"></span>'+
       '<span class="snm">'+h.name+'</span><span class="sin">'+inTxt+'</span>'+
       (i>0?'<span class="srm" title="移除">✕</span>':'<span class="sin">房主</span>');
-    d.querySelector('.sdot').onclick = ()=>{ const free = freeColors().filter(c=>c!==h.color); h.color = free[(free.indexOf(h.color)+1) % free.length] || free[0] || h.color; h.color = free[0]!==undefined ? free[(free.indexOf(h.color)+1+free.length)%free.length] : h.color; refreshLobbyUI(); };
+    d.querySelector('.sdot').onclick = ()=>{ h.color = nextFreeColor(h); refreshLobbyUI(); AU.unlock(); AU.click(); };
     const rm = d.querySelector('.srm');
     if(rm) rm.onclick = ()=>removeHuman(i);
     UI.lobbySlots.appendChild(d);
   });
-  const bots = lobby.botCount >= 0
-    ? Math.min(lobby.botCount, MAX_RACERS - lobby.humans.length)
-    : (lobby.botFill ? MAX_RACERS - lobby.humans.length : 0);
+  const bots = lobby.botCount >= 0 ? Math.min(lobby.botCount, MAX_RACERS - lobby.humans.length) : MAX_RACERS - lobby.humans.length;
   const total = lobby.humans.length + bots;
   const info = document.createElement('div');
   info.className = 'slotinfo';
@@ -495,26 +643,37 @@ addEventListener('blur', ()=>{ for(const k in keys) keys[k]=false; });
 
 // E2E / debug virtual drive: {racerName: {mx,mz,jump,dive}}
 const DBG_DRIVE = {};
+// ?test=1 boots without WebGL so the regression suites (tests/) can drive the
+// simulation headlessly; everything else behaves exactly as normal.
+S.testMode = /[?&]test=1(&|$)/.test(location.search);
 window._DBG = { drive: DBG_DRIVE, S, racers, lobby,
   start(idx, opts){ startRace(idx, opts); },
   state(){ return racers.map(r=>({n:r.name, x:+r.body.pos.x.toFixed(2), y:+r.body.pos.y.toFixed(2), z:+r.body.pos.z.toFixed(2), fin:r.finished, rank:r.finishRank, falls:r.falls, up:r.body.upright})); },
   // synchronous fast-forward: run `sec` seconds of simulation without waiting
   // for real time (returns finishers). Audio/toasts muted during the run.
   advance(sec){
-    const mute = AU.on; AU.on = false;
+    AU.muted = true;
     const n = Math.round(sec / FIXED);
     for(let i=0;i<n;i++){
       if(S.phase === 'done' || S.phase === 'menu') break;
       stepSim();
     }
-    AU.on = mute;
+    AU.muted = false;
     return {
       phase: S.phase, t: +S.raceClock.toFixed(1),
       fin: racers.filter(r=>r.finished).map(r=>({n:r.name, t:+r.finishTime.toFixed(1), rank:r.finishRank})),
       unfin: racers.filter(r=>!r.finished).map(r=>({n:r.name, z:+r.body.pos.z.toFixed(1), falls:r.falls})),
       totalFalls: racers.reduce((a,r)=>a+r.falls,0)
     };
-  }
+  },
+  // --- hooks used by tests/suites.js (harmless in normal play) ---
+  ui(){ updateHUD(0.2); updateHints(); updateKeyLights(); },
+  columns(){ refreshColumnHud(); },
+  toast(msg){ toast(msg); },
+  menu(){ backToMenu(); },
+  pause(){ togglePause(); },
+  addHuman(map){ return joinHuman({kind:'kb', map: map === undefined ? lobby.humans.length : map}); },
+  lobbyReset(){ lobby.humans.length = 1; lobby.humans[0].color = 0; lobby.botCount = -1; refreshLobbyUI(); }
 };
 
 function humanIntent(r){
@@ -559,7 +718,7 @@ function mkBody(){
 }
 function makeRacer(opts){
   const r = {
-    id: opts.id, name: opts.name, colorHex: opts.colorHex,
+    id: opts.id, name: opts.name, colorHex: opts.colorHex, seat: opts.seat|0,
     kind: opts.kind, input: opts.input || null,
     body: mkBody(), finished:false, finishRank:0, finishTime:0,
     falls:0, coins:0, celebrate:null, brain: null
@@ -597,7 +756,7 @@ function stepBody(B, intent, dt, r){
 
   // --- horizontal drive ---
   if(B.upright || B.dive){
-    const lim = (B.dive ? DIVE_V : MAX_SPD) * (glue < 1 ? 0.82 : 1) * (B.speedMul||1);
+    const lim = (B.dive ? DIVE_V : MAX_SPD) * (glue < 1 ? 0.82 : 1) * (B.speedMul||1) * (1 + (r ? coinBonus(r.coins) : 0));
     if(ix || iz){
       // input accel is capped at the speed limit along the input direction;
       // only external pushes (boost pads, knockbacks) may exceed the limit
@@ -663,7 +822,7 @@ function stepBody(B, intent, dt, r){
     B.vel.z += (iz/dl)*DIVE_V*0.45;
     if(wasGrounded) B.vel.y = Math.max(B.vel.y, 3.0);
     else if(B.vel.y < -1) B.vel.y = -1;     // soften a fall into a lunge
-    if(r && r.kind==='human') AU.beep(340,0.18,'sawtooth',0.09,-160);
+    if(r && r.kind==='human') AU.dive();
   }
   B.diveHeld = !!intent.dive;
   if(B.dive) B.diveT += dt;   // ended after the ground resolve (see below)
@@ -712,10 +871,12 @@ function stepBody(B, intent, dt, r){
     const diff = g1.y - B.pos.y;
     if(diff <= 0.42 || (feetY0 >= g1.y - 0.03 && B.vel.y <= 0.001)){
       // step-up / standing / landed-from-above
-      const fallV = B.vel.y;
-      B.pos.y = g1.y;
-      B.grounded = true;
-      B.groundBoard = g1.board;
+        const fallV = B.vel.y;
+        B.pos.y = g1.y;
+        B.grounded = true;
+        B.groundBoard = g1.board;
+        // standing on a falling-tile bridge arm(s) the tile under our feet
+        if(g1.board && g1.board.type === 'tile' && g1.board.state === 'idle') g1.board._stood = true;
       if(g1.board && g1.board.bounce && S.worldT - (B.bounceCd||0) > 0.45){
         // Fall-Guys style pad: ANY contact launches (walking on or landing),
         // with a short cooldown so you don't re-trigger mid-flight
@@ -806,8 +967,24 @@ function resolveSolids(B, r){
         }
         if(d < 1e-4){ nx = 0; nz = -1; d = 1; }
         nx /= d; nz /= d;
-        B.pos.x = c._cx + nx * (reach + 0.001);
-        B.pos.z = c._cz + nz * (reach + 0.001);
+        let px = c._cx + nx * (reach + 0.001), pz = c._cz + nz * (reach + 0.001);
+        // RAIL CORNER: a ball that sits close to the side rail also has a
+        // corner where "straight out from the centre" points INTO the rail.
+        // The road clamp then pushes us back into the ball and we are pinned.
+        // Slide to the nearest point of the circle that is still on the road.
+        const rx2 = API.roadXAt(B.pos.z);
+        const loX = rx2[0] + CY_R*0.8, hiX = rx2[1] - CY_R*0.8;
+        if(px < loX || px > hiX){
+          const cxn = ((px < loX ? loX : hiX) - c._cx) / (reach + 0.001);
+          if(Math.abs(cxn) < 1){
+            const sz = Math.sqrt(1 - cxn*cxn) * (nz >= 0 ? 1 : -1);
+            nx = cxn; nz = sz;
+            px = px < loX ? loX : hiX;
+            pz = c._cz + sz * (reach + 0.001);
+          }
+        }
+        B.pos.x = px;
+        B.pos.z = pz;
         // kill only the velocity going INTO the ball (tangential part is kept)
         const into = B.vel.x*nx + B.vel.z*nz;
         if(into < 0){ B.vel.x -= nx*into; B.vel.z -= nz*into; }
@@ -826,12 +1003,13 @@ function resolveSolids(B, r){
             kx = B.pos.x - c._cx; kz = B.pos.z - c._cz;
             const kl = Math.max(0.05, Math.hypot(kx, kz)); kx /= kl; kz /= kl;
           }
-          // HEAD-ON KICK: when the normal is almost purely front-to-back, a
-          // straight-back kick returns you to the same spot and you walk
-          // straight back in — forever. Lean the kick ~28° toward the side
-          // you are steering so the rebound clears the ball's edge.
-          if(Math.abs(kx) < 0.14){
-            const side = (B.vel.x > 0.05) ? 1 : (B.vel.x < -0.05) ? -1 : 1;
+          // HEAD-ON KICK: when the normal is nearly front-to-back, a kick
+          // straight back returns you to the same spot and you walk straight
+          // back in — forever (a player holding "forward" yo-yos at the ball).
+          // Any contact flatter than ~24° is leaned to ~28° toward the side
+          // you are steering, or away from the nearer rail if you are not.
+          if(Math.abs(kx) < 0.4){
+            const side = (B.vel.x > 0.05) ? 1 : (B.vel.x < -0.05) ? -1 : (c._cx <= 0 ? 1 : -1);
             const zSign = kz >= 0 ? 1 : -1;
             kx = side * 0.47; kz = zSign * 0.883;
           }
@@ -916,7 +1094,10 @@ function separateRacers(){
         b.pos.x += nx*overlap*(wb/tw); b.pos.z += nz*overlap*(wb/tw);
         const rel = (b.vel.x-a.vel.x)*nx + (b.vel.z-a.vel.z)*nz;
         if(rel < 0){
-          const imp = rel*0.35;
+          // bots are gentle with each other: nine of them funnelling onto one
+          // 3m pad otherwise shove the front runner to nearly twice the run
+          // speed. Any collision involving a human keeps the full push.
+          const imp = rel*((racers[i].kind === 'bot' && racers[j].kind === 'bot') ? 0.12 : 0.35);
           a.vel.x += nx*imp; a.vel.z += nz*imp;
           b.vel.x -= nx*imp; b.vel.z -= nz*imp;
         }
@@ -932,11 +1113,13 @@ function safeSpot(x, z, human){
   const g = API.groundAt(x, z, 3);
   if(g.y < 0) return false;
   if(g.board && (g.board.bounce || g.board.disabled)) return false;
+  // never on a falling tile: a bot respawns lying down for ~0.6s and the tile
+  // drops at 0.5s, so it would go straight back into the void
+  if(g.board && g.board.type === 'tile') return false;
   // humans only: never respawn on a surface that pushes you on its own — a
   // boost pad right before a gap would relaunch you into the void and loop
   // the respawn forever (the "fall again right after respawn" bug)
   if(human && g.board && (g.board.boost || g.board.belt)) return false;
-  if(g.board && g.board.type === 'tile' && g.board.state !== 'idle') return false;
   const L = LVL[S.levelIdx];
   const rx = API.roadXAt(z);
   if(x < rx[0]+0.3 || x > rx[1]-0.3) return false;
@@ -970,7 +1153,12 @@ function nearVoidEdge(x, z, clear){
 function fallRespawn(r){
   r.falls++;
   const L = LVL[S.levelIdx];
-  if(r.kind==='human'){ AU.fall(); }
+  if(r.kind==='human'){
+    AU.fall();
+    const spilled = Math.min(r.coins, COINS_LOST_ON_FALL);
+    r.coins -= spilled;
+    if(spilled) toast('🍬 ' + r.name + ' 跌甩咗 ' + spilled + ' 粒硬幣');
+  }
   if(S.particles) S.particles.burst(r.body.pos.x, -5.5, r.body.pos.z, 0x9fe8ff, 16, 1.4, 6, 8, 0.8);
   const baseZ = Math.max(L.spawn[2], r.body.pos.z - 5);
   const slots = [r.body.pos.x, 0, -1.2, 1.2, -2.4, 2.4];
@@ -988,10 +1176,12 @@ function fallRespawn(r){
     for(const sx of slots){
       const cx = Math.max(rxz[0]+0.5, Math.min(rxz[1]-0.5, sx));
       let ok = safeSpot(cx, cz, human);
-      if(ok && human){
-        // stay clear of the next drop (1.6m) and of launch pads in the run-up
-        // (2.5m) so a respawn can't be auto-launched straight back into the void
-        ok = !nearVoidEdge(cx, cz, 1.6) && !launchPadAhead(cx, cz, 2.5);
+      if(ok){
+        // stay clear of the next drop so the get-up (bots lie down ~0.6s)
+        // cannot end with a step into nothing. Humans also keep clear of
+        // launch pads in the run-up (2.5m) so a respawn can't be
+        // auto-launched straight back into the void
+        ok = !nearVoidEdge(cx, cz, human ? 1.6 : 1.2) && !(human && launchPadAhead(cx, cz, 2.5));
       }
       if(ok){
         const g = API.groundAt(cx, cz, 3);
@@ -1041,6 +1231,9 @@ function startRace(idx){
   if(S.water){ S.water.geometry.dispose(); S.water.material.dispose(); }
   if(S.sky){ S.sky.geometry.dispose(); S.sky.material.dispose(); }
   if(S.particles && S.particles.dispose) S.particles.dispose();
+  // release the previous build's own GPU resources (per-gap materials, fan
+  // columns, tile materials); _GEO / MAT_CACHE entries are shared and stay
+  if(API.disposeLevel) API.disposeLevel();
   S.composer = null;   // rebuilt against the new scene on next render
   S.scene = new T.Scene();
   S.scene.fog = new T.Fog(new T.Color(L.fog[0],L.fog[1],L.fog[2]).getHex(), 40, 160);
@@ -1061,11 +1254,11 @@ function startRace(idx){
   let bots = 0;
   if(window.SRR_AI){
     if(lobby.botCount >= 0) bots = Math.min(lobby.botCount, MAX_RACERS - lobby.humans.length);
-    else if(lobby.botFill) bots = MAX_RACERS - lobby.humans.length;
+    else bots = MAX_RACERS - lobby.humans.length;
   }
   const total = lobby.humans.length + bots;
   lobby.humans.forEach((h,i)=>{
-    racers.push(makeRacer({id:i, name:h.name, colorHex:COLORS[h.color], kind:'human', input:h.input}));
+    racers.push(makeRacer({id:i, name:h.name, colorHex:COLORS[h.color], kind:'human', input:h.input, seat:i}));
   });
   for(let i=0;i<bots;i++){
     const meta = window.SRR_AI.botInfo(i);
@@ -1083,7 +1276,7 @@ function startRace(idx){
   // one follow-camera per human racer (split-screen when 2+)
   clearViewComposers();
   rebuildViews();
-  updateSplitLines();
+  refreshColumnHud();
 
   S.worldT = 0; S.raceClock = 0; S.tLeft = L.time;
   if(window.SRR_ANALYTICS && window.SRR_ANALYTICS.reset) window.SRR_ANALYTICS.reset();
@@ -1092,6 +1285,7 @@ function startRace(idx){
   S.camYaw = Math.PI; S.camPitch = 0.46; S.camDist = 9.5; S.camShake = 0;
   cdLast = 4;
   hintIdx = -1;
+  UI.hint.textContent = '';      // not the previous race's hint until the first band
 
   UI.hud.classList.remove('hidden');
   UI.clockEl.classList.remove('low');
@@ -1103,6 +1297,7 @@ function startRace(idx){
   UI.racestrip.innerHTML = '';
   buildRaceStrip();
   updateHUD();
+  AU.startMusic('race');
 }
 function disposeBean(r){
   r.mesh.traverse(o=>{
@@ -1142,7 +1337,7 @@ function racerFinish(r){
     z: L.ring[0][2] + 1.2 + Math.floor(r.finishRank/2)*0.85
   };
   if(r.kind === 'human'){
-    AU.win();
+    AU.finish();
     toast('🏁 ' + r.name + ' 第 ' + r.finishRank + ' 名衝線！');
     if(S.particles){
       for(let i=0;i<3;i++) S.particles.burst(r.body.pos.x, r.body.pos.y+1.5+i, r.body.pos.z, [0xff5c9d,0x31e6ff,0xffd23e][i], 16, 1.2, 7, 6, 1.1);
@@ -1166,60 +1361,88 @@ function celebrateIntent(r){
 function endRace(reason){
   if(S.phase === 'done') return;
   S.phase = 'done';
+  AU.stopMusic(true);            // the results jingle takes over
   buildResults(reason);
 }
 
+// ---- personal records: best time + stars, one set per seat and level ----
+// Seat 0 (P1) keeps the original keys, so existing saves still count.
+function recordKeys(levelIdx, seat){
+  return seat === 0 ? { best: 'best' + levelIdx, stars: 'stars' + levelIdx }
+                    : { best: 'best' + levelIdx + '_p' + seat, stars: 'stars' + levelIdx + '_p' + seat };
+}
+function starsFor(tUsed, L){
+  return tUsed <= L.time*0.45 ? 3 : tUsed <= L.time*0.7 ? 2 : 1;
+}
+const medalOf = i => i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '';
+
 function buildResults(reason){
   const L = LVL[S.levelIdx];
-  const order = [...racers].sort((a,b)=>{
-    if(a.finished && b.finished) return a.finishRank - b.finishRank;
-    if(a.finished) return -1;
-    if(b.finished) return 1;
-    return progOf(b) - progOf(a);
+  const order = standingsOrder();
+  const humans = racers.filter(r => r.kind === 'human');
+  const st = store.get();
+  let anyFinished = false;
+  // one card per human player: place, time, coins, falls, personal best
+  const cards = humans.map(r => {
+    const k = recordKeys(S.levelIdx, r.seat|0);
+    const prev = st[k.best];
+    let isNew = false;
+    if(r.finished){
+      anyFinished = true;
+      if(prev === undefined || r.finishTime < prev){ st[k.best] = r.finishTime; isNew = true; }
+      st[k.stars] = Math.max(starsFor(r.finishTime, L), st[k.stars] || 0);
+    }
+    return { r, isNew, best: st[k.best] };
   });
-  const p1 = racers.find(r=>r.kind==='human');
+  if(anyFinished){
+    st.cur = Math.min(LVL.length-1, S.levelIdx+1);      // remember where we got to
+    store.set(st);
+    refreshLevelSel();
+  }
+  // the title follows the best-placed human
+  const ranked = cards.slice().sort((a, b) => (a.r.finished ? a.r.finishRank : 99) - (b.r.finished ? b.r.finishRank : 99));
+  const best = ranked[0];
   let title, titleCls;
-  if(p1 && p1.finished){
-    title = p1.finishRank === 1 ? '🥇 冠軍！' : p1.finishRank === 2 ? '🥈 亞軍！' : p1.finishRank === 3 ? '🥉 季軍！' : '🏁 第 '+p1.finishRank+' 名';
+  if(best && best.r.finished){
+    const rk = best.r.finishRank;
+    title = rk === 1 ? '🥇 冠軍！' : rk === 2 ? '🥈 亞軍！' : rk === 3 ? '🥉 季軍！' : '🏁 第 ' + rk + ' 名';
     titleCls = 'win';
   } else {
-    title = '💥 時間到！';
+    title = '⏰ 時間到！';
     titleCls = 'lose';
   }
+  let html = '';
+  // the podium
+  html += '<div class="podium">' + order.slice(0, 3).map((r, i) =>
+    '<div class="pod" style="border-color:' + r.colorHex + '">' + medalOf(i) + ' ' + r.name +
+    '<span>' + (r.finished ? r.finishTime.toFixed(1) + 's' : '完成 ' + Math.round(progOf(r)*100) + '%') + '</span></div>').join('') + '</div>';
+  // every human player's own numbers
+  if(cards.length){
+    html += '<div class="resCards">' + cards.map(c => {
+      const r = c.r, n = starsFor(r.finishTime, L);
+      return '<div class="resCard" style="border-color:' + r.colorHex + '">' +
+        '<div class="cn">' + r.name + ' · ' + (r.finished ? '第 ' + r.finishRank + ' 名' : '未完成') + '</div>' +
+        '<div class="ct">' + (r.finished ? r.finishTime.toFixed(1) + 's' : Math.round(progOf(r)*100) + '%') + '</div>' +
+        (r.finished ? '<div class="cs">' + '★'.repeat(n) + '☆'.repeat(3 - n) + '</div>' : '') +
+        '<div>🍬 硬幣 ' + r.coins + ' <span class="mut">（加速 +' + Math.round(coinBonus(r.coins)*100) + '%）</span></div>' +
+        '<div>💀 落水 ' + r.falls + ' 次</div>' +
+        (c.best !== undefined ? '<div class="mut">個人最佳 ' + c.best.toFixed(1) + 's' + (c.isNew ? ' <span class="new">★ 新紀錄！</span>' : '') + '</div>' : '') +
+        '</div>';
+    }).join('') + '</div>';
+  }
+  // everyone, in finishing order
+  html += '<div class="resList">' + order.map((r, i) =>
+    '<div class="rrow' + (r.kind === 'human' ? ' me' : '') + (r.finished ? ' fin' : '') + '" style="animation-delay:' + (0.12 + i*0.04).toFixed(3) + 's">' +
+    '<span class="rp' + (r.kind === 'human' ? ' me' : '') + '">' + (medalOf(i) || (i + 1)) + '</span>' +
+    '<span class="dot" style="background:' + r.colorHex + '"></span>' +
+    '<span class="nm">' + r.name + (r.kind === 'human' ? ' 👤' : ' 🤖') + '</span>' +
+    '<span class="rk">' + (r.finished ? r.finishTime.toFixed(1) + 's' : Math.round(progOf(r)*100) + '%') + '</span></div>').join('') + '</div>';
   UI.resTitle.textContent = title;
   UI.resTitle.className = titleCls;
-  // solo records
-  let recordLine = '';
-  if(p1 && p1.finished && lobby.humans.length === 1){
-    const tUsed = p1.finishTime;
-    let stars = 1;
-    if(tUsed <= L.time*0.45) stars = 3;
-    else if(tUsed <= L.time*0.7) stars = 2;
-    const st = store.get();
-    const bk = 'best'+S.levelIdx;
-    if(!st[bk] || tUsed < st[bk]) st[bk] = tUsed;
-    st['stars'+S.levelIdx] = Math.max(stars, st['stars'+S.levelIdx]||0);
-    st.cur = Math.min(LVL.length-1, S.levelIdx+1);
-    store.set(st);
-    recordLine = '<div class="stars">⭐ '+'★'.repeat(stars)+'☆'.repeat(3-stars)+'　用時 '+tUsed.toFixed(1)+'s</div>';
-    refreshLevelSel();
-    AU.win();
-  } else if(!p1 || !p1.finished){
-    AU.lose();
-  }
-  let rows = '';
-  order.forEach((r,i)=>{
-    const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(r.finished?(''+(i+1)):'—');
-    rows += '<div class="rrow'+(r.kind==='human'?' me':'')+(r.finished?' fin':'')+'" style="animation-delay:'+(0.12 + i*0.055).toFixed(3)+'s">'+
-      '<span class="rp">'+medal+'</span>'+
-      '<span class="dot" style="background:'+r.colorHex+'"></span>'+
-      '<span class="nm">'+r.name+(r.kind==='human'?' 👤':' 🤖')+'</span>'+
-      (r.finished ? '<span class="rk">'+r.finishTime.toFixed(1)+'s</span>'
-                  : '<span class="rk">'+(progOf(r)*100).toFixed(0)+'%</span>')+
-      '</div>';
-  });
-  UI.resStats.innerHTML = recordLine + '<div class="resList">'+rows+'</div>';
+  UI.resStats.innerHTML = html;
+  UI.btnNext.textContent = S.levelIdx + 1 < LVL.length ? '➜ 下一關' : '🏆 完賽！返回主選單';
   UI.resOv.classList.remove('hidden');
+  AU.jingle(best && best.r.finished ? 'win' : 'lose');
 }
 
 function progOf(r){
@@ -1227,25 +1450,84 @@ function progOf(r){
   return Math.min(1, Math.max(0, (r.body.pos.z - L.spawn[2])/(L.ring[0][2]-L.spawn[2])));
 }
 
-// DOM dividers between split-screen viewports
-function updateSplitLines(){
-  const box = document.getElementById('splitlines');
+// ================= split-screen HUD =================
+// One screen column per human player, so each player can tell which view is
+// theirs and sees their OWN standing / win% / hint / keys. The single-player
+// panels (full standings list, stats box, key widget, mouse hint) would all
+// land on top of the right-most player's view, so they are solo-only; the
+// full standings are on the pause screen instead.
+const KEY_LABEL = { Space:'Space', ShiftLeft:'左Shift', ShiftRight:'右Shift', ControlRight:'右Ctrl', Numpad0:'Num0', Enter:'Enter', Slash:'/',
+  ArrowUp:'↑', ArrowDown:'↓', ArrowLeft:'←', ArrowRight:'→' };
+const keyLabel = code => KEY_LABEL[code] || code.replace('Key','');
+
+// on-screen key widget for one player: their own keys, lighting up when pressed
+function buildKeyWidget(box, map){
+  const m = KB_MAPS[map];
+  box.innerHTML = '';
+  const row = () => { const r = document.createElement('div'); r.className = 'rowk'; box.appendChild(r); return r; };
+  const cap = (r, codes, cls, tag) => {
+    const k = document.createElement('div');
+    k.className = 'wk' + (cls ? ' ' + cls : '');
+    k.innerHTML = '<span>' + keyLabel(codes[0]) + '</span>' + (tag ? '<div class="tag">' + tag + '</div>' : '');
+    k._codes = codes;
+    r.appendChild(k);
+    return k;
+  };
+  const r1 = row(); cap(r1, m.dive, 'sh', '撲倒'); cap(r1, m.jump, 'sp');
+  const r2 = row(); cap(r2, m.left); cap(r2, m.up); cap(r2, m.down); cap(r2, m.right);
+  return [...box.querySelectorAll('.wk')];
+}
+function refreshColumnHud(){
+  const humans = racers.filter(r=>r.kind==='human');
+  const split = humans.length > 1;
+  for(const el of [UI.rankBox, UI.stBox, UI.rotHint, UI.keyrow, UI.hint]) if(el) el.classList.toggle('solo-only', split);
+  document.body.classList.toggle('split', split);
+  S.keyCaps = [];
+  // start from a clean slate every time: a race that goes from four players
+  // to one must not keep the old columns under the solo panels
+  if(UI.colHud) UI.colHud.innerHTML = '';
+  for(const r of racers) r.colEl = null;
+  if(!split){
+    // one player: the key widget lives in the corner and shows P1's keys
+    if(UI.keyrow) for(const c of buildKeyWidget(UI.keyrow, humans[0] ? humans[0].input.map : 0)) S.keyCaps.push({ cap: c });
+    return;
+  }
+  const box = UI.colHud;
   if(!box) return;
   box.innerHTML = '';
-  const n = racers.filter(r=>r.kind==='human').length;
-  if(n < 2) return;
-  // all-vertical split: one divider between each side-by-side column
-  for(let c=1;c<n;c++){
-    const d = document.createElement('div');
-    d.style.cssText = 'position:fixed;top:0;bottom:0;left:'+(c*100/n)+'%;width:3px;background:rgba(255,255,255,.4);z-index:9;pointer-events:none';
-    box.appendChild(d);
-  }
+  const n = humans.length;
+  humans.forEach((r, i)=>{
+    const col = document.createElement('div');
+    col.className = 'colhud';
+    col.style.left = (i*100/n) + '%';
+    col.style.width = (100/n) + '%';
+    col.innerHTML =
+      '<div class="cprog"><i></i></div>' +
+      '<div class="ctag"><i style="background:' + r.colorHex + '"></i>' + r.name + '<span>' + KB_NAMES[r.input.map] + '</span></div>' +
+      '<div class="cstat"></div>' +
+      '<div class="chint"></div>' +
+      '<div class="ckeys"></div>' +
+      (i > 0 ? '<div class="cdiv"></div>' : '');
+    box.appendChild(col);
+    r.colEl = { prog: col.querySelector('.cprog i'), stat: col.querySelector('.cstat'), hint: col.querySelector('.chint'), hintIdx: -1 };
+    for(const c of buildKeyWidget(col.querySelector('.ckeys'), r.input.map)) S.keyCaps.push({ cap: c, racer: r });
+  });
+}
+function updateKeyLights(){
+  for(const k of S.keyCaps) k.cap.classList.toggle('on', k.cap._codes.some(c => keys[c]));
+}
+function clearColumnHud(){
+  if(UI.colHud) UI.colHud.innerHTML = '';
+  for(const r of racers) r.colEl = null;
+  S.keyCaps = [];
+  for(const el of [UI.rankBox, UI.stBox, UI.rotHint, UI.keyrow, UI.hint]) if(el) el.classList.remove('solo-only');
+  document.body.classList.remove('split');
 }
 
 // ================= camera / split-screen views =================
 // One follow-camera per HUMAN racer. Solo (or bots-only spectate) renders
-// full-frame with bloom; 2+ humans render a split-screen grid (1P full,
-// 2P top/bottom, 3-4P quad, 5P+ three per row) with scissored viewports.
+// full-frame; 2-4 humans render side-by-side full-height columns (all splits
+// vertical), each with its own post chain and scissored viewport.
 function makeView(racer){
   return {
     racer,
@@ -1475,65 +1757,82 @@ function updateHUD(dt){
     const p = Math.min(1, Math.max(0, (r.body.pos.z - z0)/(z1-z0)));
     r.stripEl.style.left = 'calc('+(p*100).toFixed(1)+'% - 5px)';
   }
-  // standings
-  const order = [...racers].sort((a,b)=>{
+  // standings: full list on the right in solo, on the pause screen, and a
+  // one-line chip per player in split-screen
+  const order = standingsOrder();
+  const AN = window.SRR_ANALYTICS;
+  const winOf = (r) => (AN && AN.racers.get(r)) ? (AN.racers.get(r).win || 0) : 0;
+  const standings = (AN && AN.standings) ? AN.standings(racers) : null;
+  const posOf = r => standings ? standings.findIndex(x=>x.r === r) + 1 : order.indexOf(r) + 1;
+  UI.rankList.innerHTML = standingRows(order, winOf, posOf);
+  const p1h = racers.find(r=>r.kind==='human');
+  UI.rankBox.querySelector('.rt').textContent = p1h
+    ? '🏁 AI 勝率 · 你（' + p1h.name + '）第 ' + posOf(p1h) + '/' + racers.length + ' · ' + (p1h.finished ? '已衝線' : winOf(p1h).toFixed(0) + '%')
+    : '🏁 AI 勝率';
+  for(const r of racers){
+    if(r.kind !== 'human') continue;
+    if(r.colEl){
+      r.colEl.stat.textContent = (r.finished ? '🏁 第 ' + r.finishRank + ' 名 · ' + r.finishTime.toFixed(1) + 's'
+        : '第 ' + posOf(r) + '/' + racers.length + ' 名 · 勝率 ' + winOf(r).toFixed(0) + '%') + ' · 落水 ' + r.falls +
+        (r.coins ? ' · 🍬 ' + r.coins + '（加速 +' + Math.round(coinBonus(r.coins)*100) + '%）' : ' · 🍬 0');
+      r.colEl.prog.style.width = (progOf(r)*100).toFixed(1) + '%';
+    } else if(r === p1h){
+      UI.stBox.innerHTML = '<div>👥 <b>'+racers.length+'</b> 人混戰</div>'+
+        '<div>🍬 硬幣 <b>'+r.coins+'</b>'+(r.coins ? ' <span class="mut">加速 +'+Math.round(coinBonus(r.coins)*100)+'%</span>' : '')+'</div>'+
+        '<div>💀 落水 <b>'+r.falls+'</b></div>';
+    }
+  }
+}
+
+// race order: finished racers by crossing time, then everyone by progress
+function standingsOrder(){
+  return [...racers].sort((a,b)=>{
     if(a.finished && b.finished) return a.finishRank - b.finishRank;
     if(a.finished) return -1;
     if(b.finished) return 1;
     return progOf(b) - progOf(a);
   });
+}
+// the list rows used by the solo rank panel and the pause screen
+function standingRows(order, winOf, posOf){
   let html = '';
-  const AN = window.SRR_ANALYTICS;
-  const winOf = (r) => (AN && AN.racers.get(r)) ? (AN.racers.get(r).win || 0) : 0;
-  const standings = (AN && AN.standings) ? AN.standings(racers) : null;
   order.forEach((r,i)=>{
-    const pct = Math.min(1, progOf(r))*100;
-    const w = winOf(r);
-    const rankOf = standings ? standings.findIndex(x=>x.r === r) + 1 : (i+1);
+    const w = winOf ? winOf(r) : 0;
+    const rank = posOf ? posOf(r) : i + 1;
     html += '<div class="rrow'+(r.kind==='human'?' me':'')+(r.finished?' fin':'')+'">'+
-      '<span class="rp'+(r.kind==='human'?' me':'')+'">'+(r.finished?'🏆':rankOf)+'</span>'+
+      '<span class="rp'+(r.kind==='human'?' me':'')+'">'+(r.finished?'🏆':rank)+'</span>'+
       '<span class="dot" style="background:'+r.colorHex+'"></span>'+
-      '<span class="nm">'+r.name+'</span>'+
+      '<span class="nm">'+r.name+(r.kind==='human'?' 👤':'')+'</span>'+
       (r.finished ? '<span class="rk">'+r.finishTime.toFixed(1)+'s</span>'
                   : '<span class="pb" title="勝率 '+w.toFixed(0)+'%"><i class="win" style="width:'+Math.max(4, w).toFixed(0)+'%"></i></span>'+
                     '<span class="wp">'+w.toFixed(0)+'%</span>')+
       '</div>';
   });
-  UI.rankList.innerHTML = html;
-  const meIdx = order.findIndex(r=>r.kind==='human');
-  const meR = meIdx >= 0 ? order[meIdx] : null;
-  const meW = meR ? winOf(meR) : 0;
-  const livePos = standings ? standings.findIndex(x=>x.human) + 1 : (meIdx + 1);
-  UI.rankBox.querySelector('.rt').textContent = meR
-    ? '🏁 AI 勝率 · 你第 '+livePos+'/'+racers.length+' · '+(meR.finished ? '已衝線' : meW.toFixed(0)+'%')
-    : '🏁 AI 勝率';
-  // P1 stats box
-  if(p1){
-    UI.stBox.innerHTML = '<div>👥 <b>'+racers.length+'</b> 人混戰</div>'+
-      '<div>🍬 硬幣 <b>'+p1.coins+'</b></div>'+
-      '<div>💀 落水 <b>'+p1.falls+'</b></div>';
-  }
+  return html;
 }
 
 let hintIdx = -1;
+// gameplay hints: one global line for P1 in solo, each player's own line in split
 function updateHints(){
   const L = LVL[S.levelIdx];
-  const p1 = racers.find(r=>r.kind==='human') || racers[0];
-  if(!L.hints || !L.hints.length || !p1){ UI.hint.textContent = ''; return; }
-  let idx = -1;
-  for(let i=0;i<L.hints.length;i++){
-    const h = L.hints[i];
-    if(p1.body.pos.z >= h.z[0] && p1.body.pos.z <= h.z[1]) idx = i;
+  if(!L || !L.hints || !L.hints.length) return;
+  for(const r of racers){
+    if(r.kind !== 'human') continue;
+    let idx = -1;
+    for(let i=0;i<L.hints.length;i++){
+      const h = L.hints[i];
+      if(r.body.pos.z >= h.z[0] && r.body.pos.z <= h.z[1]) idx = i;
+    }
+    if(r.colEl){
+      if(idx !== r.colEl.hintIdx){
+        r.colEl.hintIdx = idx;
+        r.colEl.hint.textContent = idx >= 0 ? '💡 ' + L.hints[idx].t : '';
+      }
+    } else if(idx !== hintIdx){
+      hintIdx = idx;
+      UI.hint.textContent = idx >= 0 ? '💡 ' + L.hints[idx].t : '';
+    }
   }
-  if(idx !== hintIdx){
-    hintIdx = idx;
-    UI.hint.textContent = idx >= 0 ? '💡 ' + L.hints[idx].t : '';
-  }
-}
-
-function showCheckpointBox(){
-  UI.cpBox.innerHTML = '<b>LEVEL '+(S.levelIdx+1)+'</b><br>'+LVL[S.levelIdx].nameEn+' · '+
-    (window.DIFF_LABELS ? window.DIFF_LABELS[S.levelIdx] : '');
 }
 
 // ================= level select / menu =================
@@ -1555,7 +1854,7 @@ function refreshLevelSel(){
       const s = store.get(); s.cur = i; store.set(s);
       [...UI.lvlSel.children].forEach(c=>c.classList.remove('cur'));
       d.classList.add('cur');
-      AU.ensure(); AU.beep(660,0.06);
+      AU.unlock(); AU.click();
     };
     UI.lvlSel.appendChild(d);
   });
@@ -1593,7 +1892,7 @@ canvas.addEventListener('wheel', e=>{
 
 // ================= buttons =================
 function wireButtons(){
-  $('btnPlay').onclick = e=>{ e.target.blur(); AU.ensure(); startRace(store.get().cur||0); };
+  $('btnPlay').onclick = e=>{ e.target.blur(); AU.unlock(); startRace(store.get().cur||0); };
   $('restart').onclick = e=>{ e.target.blur(); if(S.phase==='race'||S.phase==='done') startRace(S.levelIdx); };
   UI.btnNext.onclick = e=>{ e.target.blur();
     if(S.levelIdx+1 < LVL.length) startRace(S.levelIdx+1);
@@ -1604,7 +1903,14 @@ function wireButtons(){
   UI.btnResume.onclick = e=>{ e.target.blur(); togglePause(); };
   UI.btnQuit.onclick = e=>{ e.target.blur(); togglePause(); backToMenu(); };
   $('btnReset').onclick = ()=>{ if(confirm('清除所有紀錄？')){ localStorage.removeItem('srr-save2'); refreshLevelSel(); } };
-  $('btnSound').onclick = e=>{ AU.on=!AU.on; e.target.textContent = AU.on?'🔊 音效：開':'🔇 音效：關'; e.target.blur(); };
+  // sound: music and effects switch separately, and the choice is remembered
+  const wireVol = (id, kind, onLevel) => {
+    const el = $(id); if(!el) return;
+    el.value = AU.vol[kind] > 0 ? 'on' : 'off';
+    el.onchange = ()=>{ AU.unlock(); AU.setVol(kind, el.value === 'on' ? onLevel : 0); if(kind === 'sfx' && AU.vol.sfx > 0) AU.click(); };
+  };
+  wireVol('musicSel', 'music', MUSIC_LEVEL);
+  wireVol('sfxSel', 'sfx', SFX_LEVEL);
   if(UI.botCount) UI.botCount.onchange = ()=>{ lobby.botCount = parseInt(UI.botCount.value, 10); refreshLobbyUI(); };
   if(UI.joinKb2) UI.joinKb2.onclick = e=>{ e.target.blur();
     for(let m=1;m<KB_MAPS.length;m++){
@@ -1618,32 +1924,33 @@ function wireButtons(){
   const commBox = $('aiComm'), commStatus = $('aiStatus');
   if(commBox && window.SRR_COMMENTATOR){
     const C = window.SRR_COMMENTATOR;
+    // 'absent' = this host has no game server (static hosting): the feature is
+    // not offered there, so the whole row is hidden rather than showing an error
+    const aiRow = $('aiRow');
     const paint = ()=>{
+      if(C.health === 'absent'){
+        aiRow.hidden = true;
+        commBox.checked = false; C.on = false;
+        return;
+      }
+      aiRow.hidden = false;
       commStatus.textContent = C.health === 'ok'
         ? ('✅ 已連接 ' + (C.model || ''))
-        : C.health === 'down' ? '❌ 搵唔到本地模型（要開 server.js + vLLM）' : '偵測中…';
-      commStatus.style.color = C.health === 'ok' ? '#7ee7a2' : '#ff8a8a';
+        : C.health === 'down' ? '❌ 本地模型未有回應' : '偵測中…';
+      commStatus.style.color = C.health === 'ok' ? '#7ee7a2' : (C.health === 'down' ? '#ff8a8a' : '#9a86c8');
     };
     commBox.onchange = ()=>{ C.on = commBox.checked; if(C.on) C.lastT = -99; };
-    C.checkHealth().then(paint);
-    setInterval(()=>{ C.checkHealth().then(paint); }, 15000);
+    const poll = ()=> C.checkHealth().then(h => { paint(); if(h === 'absent') clearInterval(timer); return h; });
+    const timer = setInterval(poll, 15000);
+    poll();
     if(commBox.disabled !== undefined) commBox.disabled = false;
   }
-  if(UI.ccust) UI.ccust.oninput = ()=>{
-    // P1 color follows the custom picker when it matches nothing
-    let nearest = 0, bestD = 1e9;
-    COLORS.forEach((c,i)=>{
-      const a = new T.Color(c), b = new T.Color(UI.ccust.value);
-      const d = Math.abs(a.r-b.r)+Math.abs(a.g-b.g)+Math.abs(a.b-b.b);
-      if(d < bestD){ bestD = d; nearest = i; }
-    });
-    lobby.humans[0].color = nearest;
-    refreshLobbyUI();
-  };
 }
 function backToMenu(){
   S.phase = 'menu';
+  UI.btnNext.textContent = '➜ 下一關';
   S.paused = false;
+  AU.startMusic('menu');
   for(const r of racers){
     if(r.mesh.parent) r.mesh.parent.remove(r.mesh);
     disposeBean(r);
@@ -1651,7 +1958,7 @@ function backToMenu(){
   racers.length = 0;
   clearViewComposers();
   S.views = [];
-  updateSplitLines();
+  clearColumnHud();
   buildMenuScene();
   UI.resOv.classList.add('hidden');
   UI.pause.classList.add('hidden');
@@ -1666,7 +1973,12 @@ function togglePause(){
   if(S.phase === 'countdown') return;
   S.paused = !S.paused;
   if(S.paused){
-    UI.pauseStats.innerHTML = '關卡 <b>'+(S.levelIdx+1)+'</b> · 剩餘 <b>'+fmt(S.tLeft)+'</b>';
+    // the full standings live here (in split-screen the rank panel is hidden)
+    const AN = window.SRR_ANALYTICS;
+    const winOf = r => (AN && AN.racers.get(r)) ? (AN.racers.get(r).win || 0) : 0;
+    const st = (AN && AN.standings) ? AN.standings(racers) : null;
+    UI.pauseStats.innerHTML = '關卡 <b>'+(S.levelIdx+1)+'</b> · 剩餘 <b>'+fmt(S.tLeft)+'</b>'+
+      '<div class="pauseList">'+standingRows(standingsOrder(), winOf, r => st ? st.findIndex(x=>x.r === r) + 1 : 0)+'</div>';
     UI.pause.classList.remove('hidden');
   } else UI.pause.classList.add('hidden');
 }
@@ -1709,13 +2021,15 @@ function stepSim(){
       if(!r.finished && B.pos.z >= Lc.ring[0][2]-1.0 && B.pos.y < 2.5){
         racerFinish(r);
       }
+      if(r.kind !== 'human') continue;              // bots leave the coins for the players
       for(const c of API.RT.collectors){
         if(c.got) continue;
         const dx=c.x-B.pos.x, dy=c.y-B.pos.y-0.4, dz=c.z-B.pos.z;
         if(dx*dx+dy*dy+dz*dz < 1.25){
           c.got = true; c.mesh.visible = false;
           r.coins++;
-          if(r.kind==='human'){ AU.coin(); toast('+1 🍬 '+r.name); }
+          AU.coin();
+          toast('+1 🍬 ' + r.name + '　糖分加速 +' + Math.round(coinBonus(r.coins)*100) + '%');
           if(S.particles) S.particles.burst(c.x, c.y, c.z, 0xffd23e, 8, 0.5, 2.5, 2, 0.5);
         }
       }
@@ -1783,6 +2097,7 @@ function frame(now){
     if(S.water) S.water.material.uniforms.tt.value = S.worldT;
     updateHints();
   }
+  updateKeyLights();
   updateHUD(dt);
   // live analytics (win% + events) — read-only, never affects the race
   if(window.SRR_ANALYTICS) window.SRR_ANALYTICS.update(racers, S, dt);
@@ -1806,6 +2121,7 @@ function buildMenuScene(){
   if(S.water){ S.water.geometry.dispose(); S.water.material.dispose(); }
   if(S.sky){ S.sky.geometry.dispose(); S.sky.material.dispose(); }
   if(S.particles && S.particles.dispose) S.particles.dispose();
+  if(API.disposeLevel) API.disposeLevel();
   S.composer = null;
   S.scene = new T.Scene();
   const L = LVL[0];
@@ -1820,11 +2136,17 @@ function buildMenuScene(){
 function boot(){
   if(!window.ThemeAPI || !window.ThemeAPI.buildLevel || !window.LEVELS){ setTimeout(boot, 60); return; }
   initGeo();
-  initRenderer();
+  if(!S.testMode) initRenderer();   // headless test mode: no WebGL, sim only
   buildMenuScene();
   wireButtons();
   refreshLevelSel();
   refreshLobbyUI();
+  // Music is optional (files in assets/audio/). Ask which files exist now;
+  // playing waits for the first click or key press, when browsers allow sound.
+  AU.wanted = 'menu';
+  AU.probe();
+  addEventListener('pointerdown', () => AU.unlock());
+  addEventListener('keydown', () => AU.unlock());
   // rAF-driven loop + watchdog: some webviews throttle rAF in the
   // background — keep the game alive via a light interval fallback
   let lastRaf = 0;
@@ -1834,6 +2156,9 @@ function boot(){
     const n = performance.now();
     if(n - lastRaf > 200){ lastRaf = n; frame(n); }
   }, 50);
+  S.booted = true;
+  window.__srrBooted = true;      // stops the "could not start" timer in index.html
+  document.documentElement.classList.add('srr-booted');
+  if(S.testMode && window.SRR_TEST && window.SRR_TEST.autorun) window.SRR_TEST.autorun();
 }
-addEventListener('beforeunload', ()=>{ try{ localStorage.setItem('srr-color', lobby.humans[0]!==undefined?COLORS[lobby.humans[0].color]:'#ff5c9d'); }catch(e){} });
 boot();

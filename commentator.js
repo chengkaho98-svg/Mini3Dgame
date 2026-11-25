@@ -16,7 +16,7 @@ const C = {
   lastLines: [],             // recent lines echoed back so the model avoids repeats
   inflight: false,
   endpoint: '/api/commentate',
-  health: 'unknown',         // 'unknown' | 'ok' | 'down'
+  health: 'unknown',         // 'unknown' | 'ok' | 'down' | 'absent' (no game server on this host)
   onError: null
 };
 window.SRR_COMMENTATOR = C;
@@ -36,10 +36,13 @@ function speak(text){
 C.checkHealth = async function(){
   try{
     const r = await fetch('/api/llm/health', { signal: AbortSignal.timeout ? AbortSignal.timeout(5000) : undefined });
+    // 404 = no game server on this host at all (static hosting such as
+    // GitHub Pages): the feature is simply not offered there
+    if(r.status === 404){ C.health = 'absent'; return C.health; }
     const j = await r.json();
-    C.health = j.ok ? 'ok' : 'down';
+    C.health = j.ok ? 'ok' : 'down';               // 'down' = server answers, model does not
     C.model = j.model;
-  }catch(e){ C.health = 'down'; }
+  }catch(e){ C.health = 'absent'; }
   return C.health;
 };
 

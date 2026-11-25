@@ -64,7 +64,7 @@ async function commentate(req, res){
     '揀最有戲劇性嘅一件事去講：領先變化、跌落水、被撞跌、逆轉、衝線、大熱門失手。',
     '每次要用唔同嘅講法：可以描述、可以打氣、可以講笑、可以分析形勢。'
     + '絕對唔可以重複「講過嘅句子」嘅句式或者用詞。',
-    '"human: true" 嘅選手係玩家，稱呼佢做「你」。提到選手要用佢哋嘅名字。',
+    '提到選手一律用名字（P1、P2、糖糖仔…）。"human: true" 嘅係玩家；只有 "solo: true"（得一位玩家）嗰陣先可以叫佢做「你」。',
     '唔好列出排名或者逐個講，集中講一件事。'
   ].join('');
   // Keep the payload focused: the top few and the player, plus the newest
@@ -73,7 +73,7 @@ async function commentate(req, res){
   const focus = rs.filter((x, i) => i < 4 || x.human).slice(0, 6);
   const said = (payload.recent || []).slice(-5);
   const user = '比賽狀況：' + JSON.stringify({
-    level: b.level, timeLeft: b.timeLeft,
+    level: b.level, solo: !!b.solo, timeLeft: b.timeLeft,
     racers: focus, recentEvents: (b.recentEvents || []).slice(-5)
   })
   + (said.length ? '\n你之前講過嘅句子（唔可以用相似句式）：' + JSON.stringify(said) : '')

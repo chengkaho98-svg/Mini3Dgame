@@ -39,13 +39,18 @@ function createBrain(id, skill){
   skill = skill || (0.72 + Math.random()*0.33);
   const rng = mulberry(id*7919 + 17);
   const brain = {
-    replanT: 0, lastDir: 0, stuck: 0, sideT: 0, sideDir: 0, blockT: 0, chargeT: 0,
+    replanT: 0, lastDir: 0, stuck: 0, sideT: 0, sideDir: 0, blockT: 0, chargeT: 0, waitT: 0, leapT: 0, pulse: 0, why: '', dbg: null,
     stallT: 0, stallX: 0, stallZ: 0,
     think(r, S, API, dt){
       const B = r.body;
       B.speedMul = 0.86 + skill*0.16;
       // downed: let the get-up timer work; crawl gently forward
-      if(!B.upright) return {mx:0, mz:0.35, jump:false, dive:false};
+      // downed: let the get-up timer work; crawl gently forward — unless the
+      // crawl would take us over an edge
+      if(!B.upright){
+        const edgeNear = API.groundAt(B.pos.x, B.pos.z + 1.3, B.pos.y + 0.45).y < -1;
+        return {mx:0, mz: edgeNear ? -0.3 : 0.35, jump:false, dive:false};
+      }
 
       brain.replanT -= dt;
       if(brain.replanT > 0){
@@ -136,8 +141,12 @@ function createBrain(id, skill){
           if(groundBefore && endsAfter && (!padAim || b.z < padAim.z)) padAim = b;
         }
       }
-      if(padAim && B.pos.z < padAim.z + padAim.hz){
-        const mxAim = Math.max(-0.9, Math.min(0.9, (padAim.x - B.pos.x)*1.6));
+      // walk-on launcher ahead: line up with it. Ground only — once we
+      // are airborne (bounce-island chains) the flight controller decides.
+      if(padAim && B.grounded && B.pos.z < padAim.z + padAim.hz){
+        // damped aim: converge on the pad's centre line without carrying
+        // sideways speed into the launch
+        const mxAim = Math.max(-0.9, Math.min(0.9, (padAim.x - B.pos.x)*1.6 - B.vel.x*0.3));
         return brain.finish(mxAim, Math.max(0.35, Math.sqrt(Math.max(0.1, 1 - mxAim*mxAim))), false, false);
       }
       let physEdge = null, lastHad = true;
@@ -147,87 +156,323 @@ function createBrain(id, skill){
         lastHad = has;
       }
       if(physEdge !== null && physEdge - B.pos.z < 5.5){
-        // landing: first standable surface beyond the edge (jump height counts)
-        let landing = -1, landingBoard = null;
-        for(let z = physEdge + 0.2; z < physEdge + 6.5; z += 0.3){
-          const g = API.groundAt(B.pos.x, z, B.pos.y + 2.8);
-          if(g.y > -1){ landing = z; landingBoard = g.board; break; }
-        }
-        // aim INTO a spinning disc (rotation shifts the touch-down point)
-        if(landingBoard && landingBoard.type === 'disc'){
-          landing = Math.min(landing + landingBoard.r*0.45, landingBoard.cz);
-        }
-        // ballistic feasibility — HEIGHT-AWARE: an elevated landing shortens
-        // the usable arc (you must still be above its top when you arrive)
-        const C = window.SRR_CONST || {JUMP_V:11.2, GRAV:34, AIRTIME:0.66};
-        const dh = Math.max(0, (landingBoard ? landingBoard.y : 0) - B.pos.y);
-        const tExit = dh > 0.4
-          ? (C.JUMP_V + Math.sqrt(Math.max(0.2, C.JUMP_V*C.JUMP_V - 2*C.GRAV*(dh+0.12)))) / C.GRAV
-          : C.AIRTIME;
-        const gapDist = (landing > 0 ? landing : physEdge + 3.2) - physEdge;
-        const slack = sp*tExit - gapDist - Math.max(0.35, sp*0.1) - 0.25;
+        const C = window.SRR_CONST || {JUMP_V:11.2, GRAV:34, MAX_SPD:6.2};
+        const V = C.JUMP_V, G = C.GRAV;
+        // airtime of a full jump from our feet down to a landing 'dh' above us
+        // (negative = landing lower, which buys extra distance). 0 = too high.
+        const arcFor = dh => { const d = V*V - 2*G*(dh + 0.04); return d > 0 ? (V + Math.sqrt(d))/G : 0; };
+        const topSpd = C.MAX_SPD * (B.speedMul || 1);
+        const edge = physEdge - B.pos.z;
         const fanned = API.fanAt(B.pos.x, physEdge + 1.2);
-        const boosted = API.RT.boards.some(b=>b.boost && b.z > B.pos.z-1.5 && Math.abs(b.z - physEdge) < 5.5);
-        const jumpable = !!fanned || (slack >= 0 && gapDist <= 6.2) || (boosted && gapDist <= 8.5 && slack >= -2.8);
-        if(jumpable){
+        const boosted = !fanned && API.RT.boards.some(b => b.boost && !b.disabled && b.z > B.pos.z - 1.5 && Math.abs(b.z - physEdge) < 5.5);
+
+        // --- updraft or launch pad carries us across: run straight in ---
+        if(fanned || boosted){
           mx = Math.max(-0.45, Math.min(0.45, -B.pos.x*0.25));
           mz = Math.sqrt(Math.max(0.15, 1 - mx*mx));
-          // counter the disc's tangential drift while riding it
-          if(B.groundBoard && B.groundBoard.type === 'disc'){
-            const db = B.groundBoard;
-            const dx = B.pos.x - db.cx, dz = B.pos.z - db.cz;
-            const tx = -dz * (db.omega||0);
-            mx = Math.max(-0.7, Math.min(0.7, mx - tx*0.4));
-            if(mx*mx > 1) mx = Math.sign(mx);
-            mz = Math.sqrt(Math.max(0.2, 1 - mx*mx));
-          }
-          // overshoot guard: a full-speed leap would fly PAST a small landing
-          // platform (e.g. bounce islands) — feather the approach first
-          const landEnd = landingBoard
-            ? (landingBoard.type === 'disc' ? landingBoard.cz + landingBoard.r
-                                            : landingBoard.z + (landingBoard.hz||1))
-            : landing + 2.2;
-          const takeoffZ = physEdge - Math.max(0.35, sp*0.1);
-          if(!fanned && !boosted && takeoffZ + sp*tExit > landEnd + 0.4 && gapDist < 3.6){
-            return brain.finish(mx, 0.16, false, false);
-          }
-          const edge = physEdge - B.pos.z;
-          if((edge < Math.max(0.38, sp*0.1) || (boosted && edge < 1.3)) && B.grounded && !fanned) jump = true;
+          if(((boosted && edge < 1.3) || edge < Math.max(0.38, sp*0.1)) && B.grounded && !fanned) jump = true;
           return brain.finish(mx, mz, jump, false);
         }
-        // already riding a ferry (mplat/elevator): sit tight near the center
-        // line and let it carry us — the landing scan re-runs every frame and
-        // unlocks the hop as soon as the far side comes into range
-        if(B.groundBoard && (B.groundBoard.type === 'mplat' || B.groundBoard.type === 'elev')){
-          const cb = B.groundBoard;
-          return brain.finish(Math.max(-0.4, Math.min(0.4, (cb.x - B.pos.x)*0.6)), 0.12, false, false);
-        }
-        // not jumpable from here: wait for a carrier (moving platform)
-        const plat = findCarrier(API, B);
-        if(plat && plat.type === 'mplat'){
-          const dxp = plat.x - B.pos.x;
-          mx = Math.abs(dxp) > 0.5 ? Math.sign(dxp)*0.85 : 0;
-          const dzp = plat.z - B.pos.z;
-          mz = (dzp < 2.0 && Math.abs(dxp) < 1.6) ? 1 : 0;
-          return brain.finish(mx, mz, false, false);
-        }
-        // too slow / too far: build a runway — creep back ONLY when almost on
-        // top of the edge at a crawl; otherwise charge to build speed (the
-        // range check re-runs every replan and unlocks once speed is high)
-        mx = Math.max(-0.4, Math.min(0.4, -B.pos.x*0.2));
-        if(physEdge - B.pos.z < 1.2 && sp < 2.6 &&
-           API.groundAt(B.pos.x, B.pos.z-0.9, B.pos.y+0.5).y > -1){
-          return brain.finish(mx, -0.9, false, false);   // retreat for speed
-        }
-        return brain.finish(mx, 1, false, false);          // charge the edge
-      }
 
-      // --- low obstacle hop (roller / glove) directly ahead ---
+        // first standable surface beyond the edge, along the lane at x
+        const landingAt = x => {
+          for(let z = physEdge + 0.2; z < physEdge + 6.5; z += 0.3){
+            const g = API.groundAt(x, z, B.pos.y + 2.8);
+            if(g.y > -1) return { z, board: g.board };
+          }
+          return null;
+        };
+        const gb = B.groundBoard;
+        const onDisc = !!(gb && gb.type === 'disc');
+        const onTile = !!(gb && gb.type === 'tile');
+        const carrier = gb && (gb.type === 'mplat' || gb.type === 'elev') ? gb : null;
+
+        // A lane whose landing we can reach. Feasibility is measured to the
+        // NEAR side of the landing: aiming deep into a small pad (the old
+        // rule) made every disc read as "unjumpable", and the bot then
+        // charged straight off the edge.
+        const laneFor = (x, dx) => {
+          const l = landingAt(x);
+          if(!l) return null;
+          // plain road comes back with no board object (its surface is y = 0)
+          const t = arcFor((l.board ? l.board.y : 0) - B.pos.y);
+          if(t <= 0) return null;
+          const near = l.z - 0.15;
+          // a ferry that is receding will have moved on by the time we land
+          const vAway = l.board && l.board.type === 'mplat' ? Math.max(0, (l.board._dz || 0) / Math.max(1e-3, dt)) : 0;
+          // 0.5 = take-off slack + the minimum clearance we insist on
+          const need = Math.max(0.3, near - physEdge) + 0.5 + vAway*t*0.9;
+          if(topSpd*t < need) return null;
+          // far end of the landing surface, for the overshoot guard
+          let end = l.z;
+          if(l.board && l.board.type === 'disc') end = l.board.cz + l.board.r*0.9;
+          else if(l.board) end = l.board.z + l.board.hz;
+          else{
+            // road: runs until the next void or the next raised platform
+            // (flat pads on the road do not interrupt it)
+            while(end < l.z + 14){
+              const g = API.groundAt(x, end + 0.25, B.pos.y + 0.45);
+              if(g.y < -1 || (g.board && g.board.type)) break;
+              end += 0.25;
+            }
+          }
+          return { t, near, end, board: l.board, mx: dx === 0 ? Math.max(-0.45, Math.min(0.45, -B.pos.x*0.25)) : Math.max(-0.8, Math.min(0.8, dx*0.9)) };
+        };
+        let lane = laneFor(B.pos.x, 0);
+        if(!lane){
+          // straight ahead is out of reach: try the nearest side lane (a tile
+          // bridge with holes, a disc off our line)
+          const [rx0, rx1] = API.roadXAt(B.pos.z);
+          for(const dx of [0.65, -0.65, 1.3, -1.3, 1.95, -1.95, 2.6, -2.6]){
+            const x2 = B.pos.x + dx;
+            if(x2 < rx0 + 0.4 || x2 > rx1 - 0.4) continue;
+            if(API.groundAt(x2, Math.min(physEdge - 0.3, B.pos.z + 0.5), B.pos.y + 0.45).y < -1) continue;
+            lane = laneFor(x2, dx);
+            if(lane) break;
+          }
+        }
+        if(lane){
+          const { t, near, end } = lane;
+          let lx = lane.mx, lz = Math.sqrt(Math.max(0.15, 1 - lx*lx));
+          if(lane.board && lane.board.type === 'disc'){
+            lx = Math.max(-0.6, Math.min(0.6, (lane.board.cx - B.pos.x)*0.5));
+            lz = Math.sqrt(Math.max(0.15, 1 - lx*lx));
+          }
+          // counter the disc's tangential drift while riding it
+          if(onDisc){
+            const tx = -(B.pos.z - gb.cz) * (gb.omega||0);
+            lx = Math.max(-0.7, Math.min(0.7, lx - tx*0.4));
+            lz = Math.sqrt(Math.max(0.2, 1 - lx*lx));
+          }
+          // (A jump under pressure is taken without an air dive: the dive adds
+          //  5.6 m/s, and a 12 m/s bot shoves whoever is ahead straight into
+          //  the next gap. brain.leapT stays 0.)
+          if(brain.leapT > 0){
+            brain.leapT -= dt;
+            if(brain.leapT <= 0){
+              brain.leapT = 0;
+              if(!B.grounded) return { mx: lx, mz: lz, jump: false, dive: true };
+            }
+          }
+
+          // WHERE to come down. A bounce pad is aimed at its centre so the
+          // chain keeps going through the next launch; a pad that bobs,
+          // travels or spins is aimed at its centre too (it moves while we
+          // are in the air). Anything else: as far onto it as the jump can
+          // reach — the more of the arc left after the near side, the safer.
+          const lo = near + 0.35, hi = end - 0.35;
+          let centre = null;
+          if(lane.board){
+            const b = lane.board;
+            const pad = b.type === 'disc' || b.type === 'elev' || b.type === 'mplat' ||
+              API.RT.boards.some(p => p !== b && p.bounce && !p.disabled && Math.abs(p.x - b.x) < 0.3 && Math.abs(p.z - b.z) < (b.hz||1)*0.5);
+            if(pad) centre = b.type === 'disc' ? b.cz : b.z;
+          }
+          const aim = pred => centre !== null ? Math.max(lo, Math.min(hi, centre)) : Math.max(lo, Math.min(hi, pred));
+
+          if(!B.grounded){
+            // IN FLIGHT. Work out where the arc comes down and steer the
+            // horizontal speed so that point is a good landing spot. The
+            // surface under that point is NOT the lane found from the edge
+            // scan (that one lies beyond it), so the standable stretches
+            // along our line are listed here from scratch, and we pick the
+            // one that needs the least change to our current speed: a bot
+            // that arrives too fast simply flies on to the next pad.
+            // Forward input is always NORMALISED — the physics caps speed
+            // along the input direction, so a short intent would let the
+            // bot run past its own limit.
+            // landable = at or below the top of our arc (we may still be rising)
+            const apex = B.pos.y + Math.max(0, B.vel.y*B.vel.y/(2*G));
+            const ivs = [];                              // [from, to, surfaceY, board]
+            let ia = null, iay = 0, iab = null, izLast = B.pos.z;
+            for(let z = B.pos.z + 0.3; z < B.pos.z + 9; z += 0.25){
+              const g = API.groundAt(B.pos.x, z, apex + 0.05);       // only surfaces the arc can come down on
+              if(g.y > -1){ if(ia === null){ ia = z; iay = g.y; iab = g.board; } }
+              else if(ia !== null){ ivs.push([ia - 0.12, z - 0.13, iay, iab]); ia = null; }
+              izLast = z;
+            }
+            if(ia !== null) ivs.push([ia - 0.12, izLast, iay, iab]);
+            const vz = Math.max(0, B.vel.z);
+            const vTop = Math.max(topSpd, vz);
+            let best = null;
+            ivs.forEach((iv, idx) => {
+              if(apex < iv[2] - 0.02) return;           // above the top of our arc: unreachable
+              const b = iv[3];
+              const isPad = !!b && (b.type === 'disc' || b.type === 'elev' || b.type === 'mplat' ||
+                API.RT.boards.some(p => p !== b && p.bounce && !p.disabled && Math.abs(p.x - b.x) < 0.3 && Math.abs(p.z - b.z) < (b.hz||1)*0.5));
+              const lo = iv[0] + 0.35;
+              // a plain platform: before a long next gap, land as close to its
+              // far edge as is safe (the next jump needs every metre); before a
+              // short one leave room for the run-up
+              const gapAfter = ivs[idx + 1] ? ivs[idx + 1][0] - iv[1] : 0;
+              const hi = iv[1] - (b && !isPad ? (gapAfter > 2.2 ? 0.25 : 0.6) : 0.35);
+              if(B.pos.z > hi) return;                   // even standing still we are past it
+              const tr = (B.vel.y + Math.sqrt(Math.max(0, B.vel.y*B.vel.y + 2*G*(B.pos.y - iv[2])))) / G;
+              let want = Math.max(lo, Math.min(hi, B.pos.z + vz*tr));
+              if(isPad) want = Math.max(lo, Math.min(hi, b.type === 'disc' ? b.cz : b.z));
+              const vNeed = (want - B.pos.z)/tr;
+              if(vNeed > vTop + 0.3){
+                // more speed than we have: only an air dive gets us there, and
+                // a dive is a last resort (it makes the bot a projectile)
+                return;                                 // (no air dives: see leapT below)
+              }
+              const cost = Math.abs(vNeed - vz) + idx*0.15;
+              if(!best || cost < best.cost) best = { want, tr, lo, cost, dive: false, idx, cx: b ? (b.type === 'disc' ? b.cx : b.x) : null };
+            });
+            brain.dbg = { n: ivs.length, best, vz, z: B.pos.z, y: B.pos.y, vy: B.vel.y };
+            if(!best){ brain.why = 'fly'; return brain.finish(lx, Math.max(0.6, lz), false, false); }
+            // sideways: line up with the middle of what we land on and kill
+            // sideways speed (pads and islands are only ~3m wide)
+            const [rx0, rx1] = API.roadXAt(B.pos.z);
+            const cx = best.cx === null ? Math.max(rx0 + 0.8, Math.min(rx1 - 0.8, B.pos.x)) : best.cx;
+            const sx = Math.max(-0.8, Math.min(0.8, (cx - B.pos.x)*0.9 - B.vel.x*0.4));
+            const p = B.pos.z + vz*best.tr;              // where we come down at this speed
+            if(p > best.want + 0.2){
+              if(B.pos.z + Math.max(0, vz - 0.5)*best.tr >= best.lo - 0.1){ brain.why = 'flyBrake'; return { mx: sx, mz: -0.7, jump: false, dive: false }; }
+              brain.why = 'flyHold';
+              return { mx: sx, mz: 0, jump: false, dive: false };
+            }
+            if(p < best.want - 0.2){ brain.why = 'flyGo'; return brain.finish(sx, Math.max(0.6, lz), false, false); }
+            brain.why = 'flyCoast';
+            return { mx: sx, mz: 0, jump: false, dive: false };
+          }
+
+          // ON THE GROUND
+          // A whacking obstacle right in front of us on the way to the take-off:
+          // wait until it has swung clear (never while standing on a tile or a
+          // carrier — those do not wait for us).
+          if(B.grounded && edge > 1.2 && !onTile && !carrier){
+            // A pendulum guards this take-off: cross its swing only while the
+            // ball is near the end of its arc (it needs over a second to come
+            // back; the crossing takes about half). Until then wait behind its reach.
+            for(const c of API.RT.solids){
+              if(c.min.x > 1e8 || c.tag !== 'pend' || c.max.z <= B.pos.z || c.min.z >= physEdge) continue;
+              const cx = (c.min.x + c.max.x)/2;
+              if(B.pos.z < c.min.z - 1.5 && Math.abs(cx) < 2.6){
+                brain.why = 'waitPendulum';
+                return { mx: lx*0.3, mz: B.pos.z < c.min.z - 1.9 ? 0.35 : 0, jump: false, dive: false };
+              }
+            }
+            const hx = B.pos.x, hz = B.pos.z + 1.25;
+            for(const c of API.RT.solids){
+              if(c.min.x > 1e8 || tagThreat(c.tag, c) < 0.9) continue;
+              if(B.pos.z < c.min.z - 1.0 &&                        // only while still behind it
+                 hx > c.min.x - 0.5 && hx < c.max.x + 0.5 && hz > c.min.z - 0.5 && hz < c.max.z + 0.5 &&
+                 c.min.y < B.pos.y + 1.25 && c.max.y > B.pos.y + 0.05){ brain.why = 'waitHazard'; return { mx: lx*0.3, mz: 0, jump: false, dive: false }; }
+            }
+          }
+          const jumpZ = physEdge - 0.25;                 // where we leave the ground
+          if(edge < 1.0) lx *= 0.3;                      // close to the edge, forward is what matters
+          lz = Math.sqrt(Math.max(0.15, 1 - lx*lx));
+          const fwd = sp * lz;                           // speed along our heading
+          const pred = jumpZ + fwd * t;                  // where a jump from here would come down
+          // Run-up speed whose jump lands on the aim point: the centre of a
+          // pad (a bounce chain keeps its speed through the next launch) or
+          // of a pad that moves; anything else as far as a full-speed jump
+          // reaches — unless that would fly past the landing into nothing,
+          // then the aim point (already inside its far end).
+          let vTarget = Math.min(topSpd, Math.max(0.8, (aim(jumpZ + topSpd*t) - jumpZ) / t));
+          const isPadLanding = centre !== null;
+          if(!isPadLanding && API.groundAt(B.pos.x, jumpZ + topSpd*t, B.pos.y + 2.8).y > -1) vTarget = topSpd;
+          if(fwd > vTarget + 0.15){
+            const brakeDist = (fwd*fwd - vTarget*vTarget) / (2*46);    // MOVE_ACC
+            // regulate only once we are inside braking range — and on a tile as
+            // late as possible: lingering on one tile lets it drop under us
+            if(edge < brakeDist + (onTile ? 0.22 : 0.6) && edge > brakeDist + 0.1){
+              if(edge > 1.0) return brain.finish(lx, -1, false, false);    // room: slow down to the landing speed
+              return { mx: lx*0.3, mz: -0.7, jump: false, dive: false };   // nearly there: bleed speed, stay ready to jump
+            }
+            if(pred > end - 0.2 && API.groundAt(B.pos.x, pred, B.pos.y + 2.8).y < -1){
+              jump = true;                               // no room to slow down: leap
+            }
+          }
+          // clearance a jump RIGHT NOW would have past the landing's near side
+          const spare = fwd*t - (near - physEdge) - edge;
+          if(!jump && spare >= 0.2 && edge <= Math.max(0.22, fwd*0.045)){
+            jump = true;                                 // late take-off = most clearance
+          } else if(!jump && spare < 0.2 && edge < 0.45){
+            // too slow to clear it from here — and never just walk off.
+            const canStop = fwd*fwd/(2*46) + 0.15 < edge;
+            if(!canStop || onTile || fwd >= topSpd - 0.2){
+              jump = true;                               // cannot stop in time / nothing to gain: leap
+            }
+            else if(API.groundAt(B.pos.x, B.pos.z - 0.9, B.pos.y + 0.5).y > -1) return brain.finish(lx, -0.9, false, false);   // step back for a run-up
+            else return { mx: lx*0.3, mz: -0.2, jump: false, dive: false };                                              // no room behind: hold
+          }
+          return brain.finish(lx, lz, jump, false);
+        }
+        if(carrier){
+          // not crossable from here yet. Hold near the middle of the platform
+          // and re-check every step. Moves are short pulses of a NORMALISED
+          // direction: a small un-normalised intent would sidestep the
+          // run-speed cap, full input all the time would overshoot.
+          const rx = carrier.x - B.pos.x, rz = carrier.z - B.pos.z;
+          if(Math.abs(rx) <= 0.3 && Math.abs(rz) <= 0.4) return { mx: 0, mz: 0, jump: false, dive: false };
+          brain.pulse = (brain.pulse + 1) % 6;
+          if(brain.pulse) return { mx: 0, mz: 0, jump: false, dive: false };
+          return brain.finish(Math.abs(rx) > 0.3 ? Math.sign(rx) : 0, Math.abs(rz) > 0.4 ? Math.sign(rz) : 0, false, false);
+        }
+        if(onTile){ brain.replanT = 0; return { mx: 0, mz: -0.2, jump: false, dive: false }; }   // let the direction sampler pick a way through
+        if(!B.grounded){
+          // airborne with nothing reachable ahead: usually a small hop after a
+          // knock, still over solid ground. Bleed speed if the arc would come
+          // down past the edge; otherwise leave the arc alone.
+          brain.why = 'flyNoLane';
+          const fall = (B.vel.y + Math.sqrt(Math.max(0, B.vel.y*B.vel.y + 2*G*Math.max(0, B.pos.y)))) / G;
+          const landZ = B.pos.z + Math.max(0, B.vel.z)*fall + 0.4;
+          const inFan = API.fanAt(B.pos.x, B.pos.z) || API.fanAt(B.pos.x, B.pos.z + 1.2) || API.fanAt(B.pos.x, B.pos.z + 2.4);
+          if(inFan) return brain.finish(0, 1, false, false);          // floating in the updraft: keep going
+          if(fall < 0.45 && API.groundAt(B.pos.x, landZ, B.pos.y + 0.5).y < -1) return { mx: 0, mz: -0.7, jump: false, dive: false };
+          return { mx: 0, mz: 0, jump: false, dive: false };
+        }
+        brain.waitT += dt;
+
+        // Nothing reachable in a straight line: wait for a ferry, or for a
+        // tile bridge to regrow. Both always come back, so wait as long as
+        // it takes — about 1.3m short of the drop (crowds shove), edged
+        // there with short pulses so the bot actually comes to rest.
+        const plat = findCarrier(API, B);
+        const standX = Math.max(-0.4, Math.min(0.4, ((plat ? plat.x : 0) - B.pos.x)*0.2));
+        // stand far enough back that nothing between us and the edge can reach us
+        let standOff = 1.3;
+        for(const c of API.RT.solids){
+          if(c.min.x > 1e8 || tagThreat(c.tag, c) < 0.9) continue;
+          // a sweeper covers the whole road even while it is swung away from us
+          const sweeps = c.tag === 'pend' || c.tag === 'mill' || c.tag === 'rotor' || c.tag === 'roller';
+          if(!sweeps && (c.min.x > B.pos.x + 1.0 || c.max.x < B.pos.x - 1.0)) continue;
+          // 1.5 = collider reach + our body radius, plus a little
+          if(c.max.z > B.pos.z - 1.6 && c.min.z < physEdge) standOff = Math.max(standOff, physEdge - c.min.z + 1.5);
+        }
+        const hold = () => {
+          const err = edge - standOff;
+          if(Math.abs(err) < 0.25) return { mx: 0, mz: 0, jump: false, dive: false };
+          if(Math.abs(err) > 0.8) return brain.finish(standX, Math.sign(err), false, false);   // far from the spot: get there
+          brain.pulse = (brain.pulse + 1) % 3;                                               // near it: edge in
+          if(brain.pulse) return { mx: 0, mz: 0, jump: false, dive: false };
+          return brain.finish(standX, Math.sign(err), false, false);
+        };
+        if(plat){
+          const dzp = plat.z - B.pos.z, dxp = plat.x - B.pos.x;
+          if(dzp < 2.0 && Math.abs(dxp) < 1.6){
+            mx = Math.abs(dxp) > 0.5 ? Math.sign(dxp)*0.85 : 0;
+            return brain.finish(mx, 1, false, false);   // it is here: walk on
+          }
+          return hold();
+        }
+        const tilesAhead = API.RT.boards.some(b => b.type === 'tile' && b.z > B.pos.z && b.z < physEdge + 6.5);
+        if(tilesAhead || brain.waitT < 2.5) return hold();
+        if(edge < 0.3 && B.grounded){ brain.waitT = 0; jump = true; }        // last resort: leap rather than walk off
+        return brain.finish(standX, 1, jump, false);
+      }
+      brain.waitT = 0;
+
+      // --- low obstacle hop (an extended glove directly ahead; the big
+      //     rolling balls are ~2m tall and cannot be jumped) ---
       if(B.grounded){
         const px = B.pos.x + mx*0.95, pz = B.pos.z + mz*0.95;
         for(const c of API.RT.solids){
           if(c.min.x > 1e8) continue;
-          if((c.tag === 'roller' || (c.tag === 'punch' && (c._ext||0) > 0.4)) && c.max.y < 1.9){
+          if(c.tag === 'punch' && (c._ext||0) > 0.4 && c.max.y < 1.9){
             if(px > c.min.x-0.5 && px < c.max.x+0.5 && pz > c.min.z-0.5 && pz < c.max.z+0.5){
               jump = true; break;
             }
@@ -394,7 +639,11 @@ function findCarrier(API, B){
 }
 
 window.SRR_AI = {
-  botInfo(i){ return {name:NAMES[i % NAMES.length], color:COLORS[i % COLORS.length], skill: 0.72 + Math.random()*0.33}; },
+  botInfo(i){ return {name:NAMES[i % NAMES.length], color:COLORS[i % COLORS.length],
+    skill: SRR_AI_SKILL !== null ? SRR_AI_SKILL : 0.72 + Math.random()*0.33}; },
   createBrain
 };
+// fixed bot skill for the regression suites (null = random, as in play)
+let SRR_AI_SKILL = null;
+window.SRR_AI.setSkill = function(s){ SRR_AI_SKILL = (typeof s === 'number') ? s : null; };
 })();
